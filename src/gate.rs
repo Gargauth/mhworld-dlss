@@ -428,7 +428,12 @@ unsafe fn engage(base: usize, decisive: bool) {
     let settings = crate::config::get();
     // The mip bias first, because it can still say "not yet": the constant it
     // is built from lives in data that may not be in place when the code is.
-    let bias = crate::tune::prepare_exact_bias(base, settings.mip_bias, settings.render_scale);
+    let bias = crate::tune::prepare_exact_bias(
+        base,
+        settings.mip_bias,
+        settings.render_scale,
+        settings.mip_bias_extra,
+    );
     // Taken before the write, because it is what the bias line reports: was
     // the game's own code already running when the instruction was changed.
     let running = RUNNING.load(Ordering::SeqCst);

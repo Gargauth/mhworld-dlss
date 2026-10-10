@@ -153,8 +153,9 @@ while the game runs. These are the ones that matter:
 
 | key | default | what it does |
 | --- | --- | --- |
-| `render_scale` | `0.667` | Fraction of the display resolution the scene is rendered at, any value from `0.50` to `1.00`. `1.00` is DLAA, `0.667` is DLSS Quality, `0.58` Balanced, `0.50` Performance. Applies while playing. |
-| `mip_bias` | `0` | `1` sharpens texture sampling to suit the render scale; `0` leaves it as the game has it. Fixed when the game starts, for the render scale set then: restart after changing either. |
+| `render_scale` | `0.667` | Fraction of the display resolution the scene is rendered at, any value from `0.50` to `1.00`. `1.00` is DLAA, `0.667` is DLSS Quality, `0.58` Balanced, `0.50` Performance. Applies while playing, but restart the game afterwards for the best picture: texture sharpness (`mip_bias`) is set for it when the game starts. |
+| `mip_bias` | `1` | `1` lets the mod work out how sharply textures are sampled, to suit the render scale; `0` leaves it as the game has it. Fixed when the game starts, for the render scale set then: restart after changing either. |
+| `mip_bias_extra` | `1.0` | With `mip_bias = 1`, how many mip levels sharper than the render scale alone asks for, `0.0` to `2.0`. `1.0` is the usual advice for DLSS; lower it if fine patterns shimmer. Fixed when the game starts. |
 | `sharpen` | `0.0` | How strongly the picture is sharpened after DLSS, `0.0` to `1.0`; `0` is off. Done before the interface is drawn, so the interface stays as it is. Applies while playing. |
 | `fg` | `0` | `1` turns frame generation on. Decided when the game starts: restart after changing it. |
 | `fg_multiplier` | `2` | Frames shown per rendered frame: `2`, `3` or `4`. Applies while playing. |

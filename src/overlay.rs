@@ -216,6 +216,7 @@ pub unsafe fn register_once() {
 #[derive(Clone, Copy, Default)]
 struct Pending {
     render_scale: Option<f32>,
+    mip_bias_extra: Option<f32>,
     sharpen: Option<f32>,
     multiplier: Option<i32>,
     /// The position of the DLSS preset slider, an index into `PRESETS`.
@@ -229,6 +230,7 @@ struct Pending {
 
 static PENDING: Mutex<Pending> = Mutex::new(Pending {
     render_scale: None,
+    mip_bias_extra: None,
     sharpen: None,
     multiplier: None,
     preset: None,
@@ -438,6 +440,43 @@ fn knob_text(knob: &Knob, value: f32) -> String {
     }
 }
 
+/// How far the bias in force may be from the one asked for before the page
+/// asks for a restart. The constant a bias is built from is found within one
+/// per cent, which is 0.014 of a level.
+const MIP_BIAS_CLOSE: f32 = 0.03;
+
+/// What the page says about the texture mip bias: what this session has,
+/// and, when the settings now ask for something else, that the game has to
+/// be restarted for it. `wanted` and `built` are biases, `None` for none.
+fn mip_bias_note(wanted: Option<f32>, built: Option<f32>) -> Vec<String> {
+    let name = |bias: Option<f32>| match bias {
+        Some(bias) => format!("{bias:+.2}"),
+        None => "none".to_string(),
+    };
+    let agree = match (wanted, built) {
+        (Some(wanted), Some(built)) => (wanted - built).abs() <= MIP_BIAS_CLOSE,
+        (None, None) => true,
+        _ => false,
+    };
+    if agree {
+        return vec![format!(
+            "Texture mip bias in this session: {}, which is what these settings ask for.",
+            name(built)
+        )];
+    }
+    vec![
+        format!(
+            "RESTART THE GAME for the best picture: the texture mip bias is {} in this session \
+             and these settings ask for {}.",
+            name(built),
+            name(wanted)
+        ),
+        "It is set when the game starts and cannot follow a change while playing. Until then \
+         textures are sampled for the old settings."
+            .to_string(),
+    ]
+}
+
 /// What the page says about frame generation, and what its box does.
 struct FrameGenerationNote {
     /// What this session is.
@@ -559,27 +598,23 @@ unsafe extern "C" fn draw(_runtime: *mut c_void) {
     }
     say("The game's own Image Quality option does nothing while the mod is loaded.");
     // The texture mip bias is a start-up quantity: the engine builds its
-    // samplers once. So it is shown against the scale it was built for, and
-    // the page says a restart is what makes it follow a new one.
-    if settings.mip_bias == 1 {
-        match crate::hijack::mip_bias_built() {
-            Some((ratio, bias)) => {
-                say(&format!(
-                    "Texture mip bias {bias:+.3}: fixed at start-up, for the render scale read \
-                     then ({ratio:.3})."
-                ));
-                say(if (ratio - settings.render_scale).abs() > 0.02 {
-                    "The render scale has changed since. Restart the game for the bias to follow it."
-                } else {
-                    "It does not follow the slider. Restart the game after changing the render \
-                     scale for the bias to follow it."
-                });
-            }
-            None => say(
-                "Texture mip bias: none in this session (the render scale read at start-up was \
-                 1.0, or the log says why not). Restart the game for it to follow a new render \
-                 scale.",
-            ),
+    // samplers once. So what this session has is held against what the
+    // settings ask for now, and the page says when only a restart will
+    // bring the two together. Its two controls are among the expert
+    // settings; this line is here because the render scale is what moves it.
+    let built = crate::hijack::mip_bias_built().map(|(_, bias)| bias);
+    if settings.mip_bias > 1 {
+        say(&format!(
+            "mip_bias = {} in mhw-dlss.ini picks one of the game's fixed biases, whatever the \
+             render scale and the slider say. Tick the box again for the one the mod works out.",
+            settings.mip_bias
+        ));
+    } else {
+        let wanted = (settings.mip_bias == 1)
+            .then(|| crate::tune::bias_wanted(settings.render_scale, settings.mip_bias_extra))
+            .flatten();
+        for line in mip_bias_note(wanted, built) {
+            say(&line);
         }
     }
 
@@ -848,12 +883,37 @@ unsafe extern "C" fn draw(_runtime: *mut c_void) {
         settings.undither,
     );
     say("Costs a little banding. Turning it back off needs a restart of the game.");
-    toggle(
-        c"Texture mip bias for the render scale (mip_bias)",
-        "mip_bias",
-        settings.mip_bias != 0,
-    );
-    say("Read when the game starts: restart the game after changing it.");
+    // The texture mip bias: whether there is one, and how much sharper than
+    // the render scale alone asks for. The mod works the figure out; both
+    // are read when the game starts, and the line under the render scale is
+    // what says when a restart is owed.
+    let mut bias = settings.mip_bias != 0;
+    if checkbox(c"Texture mip bias for the render scale".as_ptr(), &mut bias) {
+        write("mip_bias", if bias { "1" } else { "0" }.to_string());
+    }
+    let range = crate::config::MIP_BIAS_EXTRA_RANGE;
+    let mut extra = pending.mip_bias_extra.unwrap_or(settings.mip_bias_extra);
+    if slider_float(
+        c"Extra texture sharpness, in mip levels".as_ptr(),
+        &mut extra,
+        range.0,
+        range.1,
+        c"%.2f".as_ptr(),
+        0,
+    ) {
+        pending.mip_bias_extra = Some(extra);
+        pending.frames = PENDING_FRAMES;
+    }
+    if released() {
+        let extra = if extra.is_finite() {
+            extra.clamp(range.0, range.1)
+        } else {
+            range.0
+        };
+        write("mip_bias_extra", format!("{extra:.2}"));
+    }
+    say("The mod works the bias out from the render scale. 1.0 extra is the usual advice for DLSS; lower it if fine patterns shimmer.");
+    say("Both are read when the game starts; the line under the render scale says when a restart is needed.");
 }
 
 #[cfg(test)]
@@ -1003,6 +1063,27 @@ mod tests {
         let failed = frame_generation_note(false, true, true);
         assert!(failed.session.contains("did not"));
         assert!(failed.restart.is_none());
+    }
+
+    #[test]
+    fn the_page_asks_for_a_restart_when_the_mip_bias_is_not_the_one_asked_for() {
+        let restart = |wanted, built| mip_bias_note(wanted, built).len() == 2;
+        // What was built is what is asked for, to within the constant found.
+        assert!(!restart(Some(-1.585), Some(-1.584)));
+        assert!(!restart(None, None));
+        // The render scale or the extra moved since the game started.
+        assert!(restart(Some(-2.0), Some(-1.584)));
+        assert!(restart(Some(-0.585), Some(-1.584)));
+        // Switched on, or off, since the game started.
+        assert!(restart(Some(-1.585), None));
+        assert!(restart(None, Some(-1.584)));
+        let note = mip_bias_note(Some(-2.0), Some(-1.584));
+        assert!(note[0].starts_with("RESTART THE GAME"));
+        assert!(note[0].contains("-1.58") && note[0].contains("-2.00"));
+        let note = mip_bias_note(Some(-1.585), None);
+        assert!(note[0].contains("is none in this session"));
+        // And said as fine when it is.
+        assert!(mip_bias_note(Some(-1.0), Some(-1.0))[0].contains("-1.00"));
     }
 
     #[test]
