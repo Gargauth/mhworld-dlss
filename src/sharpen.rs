@@ -150,7 +150,13 @@ struct Sharpener {
 unsafe impl Send for Sharpener {}
 unsafe impl Sync for Sharpener {}
 
-static SHARPENER: Mutex<Option<Sharpener>> = Mutex::new(None);
+/// One for each size of target met, up to `KEPT`. The resolve does not
+/// always go to the same target: a frame without an upscale stage, which is
+/// what a loading screen is, resolves at the render size. With one sharpener
+/// the pass was rebuilt, shader and all, at every change from one to the
+/// other.
+static SHARPENERS: Mutex<Vec<Sharpener>> = Mutex::new(Vec::new());
+const KEPT: usize = 3;
 /// Sharpeners that have been replaced, with the frames each is still kept.
 static RETIRED: Mutex<Vec<(u32, Sharpener)>> = Mutex::new(Vec::new());
 /// The size and format the pass could not be built for, so that it is not
@@ -359,7 +365,7 @@ fn writable(size: (u32, u32), display: (u32, u32), format: i32) -> Result<(), St
 
 /// The sharpener for this frame's target, built or rebuilt if it has to be.
 unsafe fn ready<'a>(
-    slot: &'a mut Option<Sharpener>,
+    kept: &'a mut Vec<Sharpener>,
     frame: &crate::dlss::Frame,
 ) -> Option<&'a mut Sharpener> {
     // One frame nearer to letting go of whatever was replaced.
@@ -384,15 +390,12 @@ unsafe fn ready<'a>(
         refuse(why);
         return None;
     }
-    if slot
-        .as_ref()
-        .is_some_and(|sharpener| sharpener.size != size || sharpener.format != info.Format)
-    {
-        if let Some(old) = slot.take() {
-            RETIRED.lock().push((RETIRE_AFTER, old));
-        }
-    }
-    if slot.is_none() {
+    let found = kept
+        .iter()
+        .position(|sharpener| sharpener.size == size && sharpener.format == info.Format);
+    let index = if let Some(index) = found {
+        index
+    } else {
         if *REFUSED.lock() == Some((size, info.Format.0)) {
             return None;
         }
@@ -407,14 +410,21 @@ unsafe fn ready<'a>(
         output.GetDevice(&mut device).ok()?;
         let device = NATIVE_DEVICE.native_interface(device?);
         match build(&device, size, info.Format) {
-            Ok(sharpener) => *slot = Some(sharpener),
+            Ok(sharpener) => {
+                // The oldest goes, but not at once: see `RETIRE_AFTER`.
+                if kept.len() >= KEPT {
+                    RETIRED.lock().push((RETIRE_AFTER, kept.remove(0)));
+                }
+                kept.push(sharpener);
+                kept.len() - 1
+            }
             Err(error) => {
                 refuse(format!("the pass could not be built ({error})"));
                 return None;
             }
         }
-    }
-    slot.as_mut()
+    };
+    kept.get_mut(index)
 }
 
 impl Sharpener {
@@ -518,7 +528,7 @@ pub unsafe fn evaluate(
     if amount <= 0.0 || !output_in_unordered_access {
         return crate::dlss::evaluate(list, frame);
     }
-    let mut guard = SHARPENER.lock();
+    let mut guard = SHARPENERS.lock();
     let Some(sharpener) = ready(&mut guard, frame) else {
         drop(guard);
         return crate::dlss::evaluate(list, frame);
