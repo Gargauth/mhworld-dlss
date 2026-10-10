@@ -20,11 +20,17 @@ use windows::Win32::Foundation::HMODULE;
 use windows::Win32::System::LibraryLoader::GetProcAddress;
 
 const SUCCESS: u32 = 0x1;
-/// `NVSDK_NGX_DLSS_Feature_Flags`: HDR colour (bit 0), inverted depth (bit 3)
-/// and auto exposure (bit 6). Bit 1, low-resolution motion vectors, is added
-/// by `flags_for` when upscaling. Bit 2, jittered motion vectors, stays off:
-/// the engine's vectors carry no jitter.
+/// `NVSDK_NGX_DLSS_Feature_Flags` as shipped: HDR colour (bit 0), inverted
+/// depth (bit 3) and auto exposure (bit 6). Bit 1, low-resolution motion
+/// vectors, is added by `flags_for` when upscaling. Bit 2, jittered motion
+/// vectors, stays off: the engine's vectors carry no jitter. The four
+/// `expert_dlss_*` keys are these bits; see `configured_flags`.
+#[cfg(test)]
 const FEATURE_FLAGS: i32 = 0x49;
+const IS_HDR: i32 = 0x1;
+const MV_JITTERED: i32 = 0x4;
+const DEPTH_INVERTED: i32 = 0x8;
+const AUTO_EXPOSURE: i32 = 0x40;
 /// `NVSDK_NGX_Feature_SuperSampling`.
 const FEATURE_SUPERSAMPLING: u32 = 1;
 
@@ -170,6 +176,17 @@ unsafe fn verify_slots(parameters: *mut c_void) -> bool {
     held
 }
 
+/// The creation flags the settings ask for, which as shipped are
+/// `FEATURE_FLAGS`. They are fixed when the feature is built, so a change
+/// of one rebuilds it (`CREATED_WITH`).
+fn configured_flags(settings: &crate::config::Config) -> i32 {
+    let bit = |on: bool, flag: i32| if on { flag } else { 0 };
+    bit(settings.expert_dlss_hdr, IS_HDR)
+        | bit(settings.expert_dlss_mv_jittered, MV_JITTERED)
+        | bit(settings.expert_dlss_depth_inverted, DEPTH_INVERTED)
+        | bit(settings.expert_dlss_auto_exposure, AUTO_EXPOSURE)
+}
+
 /// The creation flags, with the one bit that depends on the resolutions.
 ///
 /// `MVLowRes` (0x2) tells DLSS the motion vector texture is the size of the
@@ -300,7 +317,7 @@ pub unsafe fn evaluate(list: *mut c_void, frame: &Frame) -> bool {
     // which `render_scale` sets; asserting one here would have DLSS scale for
     // a ratio it is not being given.
     let quality = preset_for(frame.render, frame.display);
-    let flags = flags_for(FEATURE_FLAGS, frame);
+    let flags = flags_for(configured_flags(&settings), frame);
     let wanted = (quality, flags, settings.dlss_preset);
     if (HANDLE.load(Ordering::Relaxed) == 0
         || *CREATED_FOR.lock() != frame.render
@@ -595,14 +612,10 @@ unsafe fn create(api: &Api, list: *mut c_void, frame: &Frame) -> bool {
     set(parameters, "OutWidth", SET_U32, frame.display.0);
     set(parameters, "OutHeight", SET_U32, frame.display.1);
     let quality = preset_for(frame.render, frame.display);
+    let flags = flags_for(configured_flags(&settings), frame);
     set(parameters, "PerfQualityValue", SET_I32, quality);
     set(parameters, "RTXValue", SET_I32, 0i32);
-    set(
-        parameters,
-        "DLSS.Feature.Create.Flags",
-        SET_I32,
-        flags_for(FEATURE_FLAGS, frame),
-    );
+    set(parameters, "DLSS.Feature.Create.Flags", SET_I32, flags);
 
     // The preset is fixed when the feature is built. Each quality level has its
     // own hint and only the one in use matters, but setting them all costs
@@ -650,7 +663,7 @@ unsafe fn create(api: &Api, list: *mut c_void, frame: &Frame) -> bool {
         frame.display.0,
         frame.display.1,
         quality,
-        flags_for(FEATURE_FLAGS, frame),
+        flags,
         // The preset that was set on the parameters, which is not always
         // the number in the settings.
         preset
@@ -686,11 +699,7 @@ unsafe fn create(api: &Api, list: *mut c_void, frame: &Frame) -> bool {
     PARAMETERS.store(parameters as usize, Ordering::Relaxed);
     HANDLE.store(handle as usize, Ordering::Relaxed);
     *CREATED_FOR.lock() = frame.render;
-    *CREATED_WITH.lock() = (
-        quality,
-        flags_for(FEATURE_FLAGS, frame),
-        settings.dlss_preset,
-    );
+    *CREATED_WITH.lock() = (quality, flags, settings.dlss_preset);
     true
 }
 
@@ -707,7 +716,23 @@ unsafe fn release(api: &Api) {
 
 #[cfg(test)]
 mod tests {
-    use super::usable_preset;
+    use super::{configured_flags, usable_preset, FEATURE_FLAGS};
+
+    /// As shipped the expert keys make the flags the mod was verified with,
+    /// and each key is one bit of them.
+    #[test]
+    fn the_shipped_expert_keys_are_the_verified_flags() {
+        let shipped = crate::config::Config::default();
+        assert_eq!(configured_flags(&shipped), FEATURE_FLAGS);
+        let mut moved = shipped;
+        moved.expert_dlss_auto_exposure = false;
+        assert_eq!(configured_flags(&moved), 0x09);
+        moved.expert_dlss_mv_jittered = true;
+        assert_eq!(configured_flags(&moved), 0x0d);
+        moved.expert_dlss_hdr = false;
+        moved.expert_dlss_depth_inverted = false;
+        assert_eq!(configured_flags(&moved), 0x04);
+    }
 
     #[test]
     fn only_the_presets_the_header_gives_a_meaning_are_passed_on() {

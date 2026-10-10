@@ -49,9 +49,11 @@ const TABLE_VERSION: u32 = 19250;
 const GET_VERSION: usize = 2;
 const SEPARATOR: usize = 80;
 const TEXT_UNFORMATTED: usize = 103;
+const SMALL_BUTTON: usize = 112;
 const CHECKBOX: usize = 115;
 const SLIDER_FLOAT: usize = 144;
 const SLIDER_INT: usize = 149;
+const COLLAPSING_HEADER: usize = 188;
 const BEGIN_DISABLED: usize = 279;
 const END_DISABLED: usize = 280;
 const IS_ITEM_DEACTIVATED_AFTER_EDIT: usize = 295;
@@ -59,7 +61,9 @@ const IS_ITEM_DEACTIVATED_AFTER_EDIT: usize = 295;
 type GetVersionFn = unsafe extern "C" fn() -> *const c_char;
 type VoidFn = unsafe extern "C" fn();
 type TextFn = unsafe extern "C" fn(*const c_char, *const c_char);
+type ButtonFn = unsafe extern "C" fn(*const c_char) -> bool;
 type CheckboxFn = unsafe extern "C" fn(*const c_char, *mut bool) -> bool;
+type HeaderFn = unsafe extern "C" fn(*const c_char, i32) -> bool;
 type SliderFloatFn =
     unsafe extern "C" fn(*const c_char, *mut f32, f32, f32, *const c_char, i32) -> bool;
 type SliderIntFn =
@@ -213,6 +217,10 @@ pub unsafe fn register_once() {
 struct Pending {
     render_scale: Option<f32>,
     multiplier: Option<i32>,
+    /// The position of the DLSS preset slider, an index into `PRESETS`.
+    preset: Option<i32>,
+    /// The expert sliders, in the order of `KNOBS`.
+    knobs: [Option<f32>; KNOBS.len()],
     /// Frames left before a pending value is dropped whether or not the file
     /// caught up, so a write that failed cannot pin a control for good.
     frames: u32,
@@ -221,6 +229,8 @@ struct Pending {
 static PENDING: Mutex<Pending> = Mutex::new(Pending {
     render_scale: None,
     multiplier: None,
+    preset: None,
+    knobs: [None; KNOBS.len()],
     frames: 0,
 });
 
@@ -297,6 +307,135 @@ fn snapped(scale: f32) -> f32 {
         .unwrap_or(scale)
 }
 
+/// A number among the expert settings: one key of the file, drawn as a
+/// slider between the ends `config` holds the key to.
+struct Knob {
+    key: &'static str,
+    label: &'static CStr,
+    range: (f32, f32),
+    /// A whole number: the integer slider, and written without a fraction.
+    whole: bool,
+    /// `ImGuiSliderFlags`.
+    flags: i32,
+    read: fn(&crate::config::Config) -> f32,
+}
+
+/// `ImGuiSliderFlags_Logarithmic`, for a range of five orders of magnitude.
+const LOGARITHMIC: i32 = 1 << 5;
+
+const JITTER_PIXELS: usize = 0;
+const JITTER_PHASES: usize = 1;
+const JITTER_REPORT_X: usize = 2;
+const JITTER_REPORT_Y: usize = 3;
+const MV_DEJITTER: usize = 4;
+const MV_SCALE_X: usize = 5;
+const MV_SCALE_Y: usize = 6;
+const ALPHA_UNROLL: usize = 7;
+
+/// The expert sliders, at the indices named above.
+const KNOBS: [Knob; 8] = [
+    Knob {
+        key: "expert_jitter_pixels",
+        label: c"Jitter width, in render pixels",
+        range: crate::config::JITTER_PIXELS_RANGE,
+        whole: false,
+        flags: 0,
+        read: |settings| settings.expert_jitter_pixels,
+    },
+    Knob {
+        key: "expert_jitter_phases",
+        label: c"Jitter phases",
+        range: (
+            crate::config::JITTER_PHASES_RANGE.0 as f32,
+            crate::config::JITTER_PHASES_RANGE.1 as f32,
+        ),
+        whole: true,
+        flags: 0,
+        read: |settings| settings.expert_jitter_phases as f32,
+    },
+    Knob {
+        key: "expert_jitter_report_x",
+        label: c"Jitter told to DLSS, X multiplier",
+        range: crate::config::SIGNED_RANGE,
+        whole: false,
+        flags: 0,
+        read: |settings| settings.expert_jitter_report.0,
+    },
+    Knob {
+        key: "expert_jitter_report_y",
+        label: c"Jitter told to DLSS, Y multiplier",
+        range: crate::config::SIGNED_RANGE,
+        whole: false,
+        flags: 0,
+        read: |settings| settings.expert_jitter_report.1,
+    },
+    Knob {
+        key: "expert_mv_dejitter",
+        label: c"Jitter added back to the motion vectors",
+        range: crate::config::SIGNED_RANGE,
+        whole: false,
+        flags: 0,
+        read: |settings| settings.expert_mv_dejitter,
+    },
+    Knob {
+        key: "expert_mv_scale_x",
+        label: c"Motion vectors, X multiplier",
+        range: crate::config::SIGNED_RANGE,
+        whole: false,
+        flags: 0,
+        read: |settings| settings.expert_mv_scale.0,
+    },
+    Knob {
+        key: "expert_mv_scale_y",
+        label: c"Motion vectors, Y multiplier",
+        range: crate::config::SIGNED_RANGE,
+        whole: false,
+        flags: 0,
+        read: |settings| settings.expert_mv_scale.1,
+    },
+    Knob {
+        key: "expert_alpha_unroll",
+        label: c"Alpha checkerboard distance (0: as the mod has it)",
+        range: crate::config::ALPHA_UNROLL_RANGE,
+        whole: false,
+        flags: LOGARITHMIC,
+        read: |settings| settings.expert_alpha_unroll,
+    },
+];
+
+/// What `dlss_preset` can be, in the order of the preset slider, with what
+/// the slider shows for each. See `dlss::usable_preset`.
+const PRESETS: [(i32, &CStr); 5] = [
+    (0, c"the driver's choice"),
+    (10, c"J"),
+    (11, c"K"),
+    (12, c"L"),
+    (13, c"M"),
+];
+
+/// Where the preset slider stands for a `dlss_preset`. A number DLSS is not
+/// asked for is the driver's choice, which is what it gets.
+fn preset_position(preset: i32) -> i32 {
+    PRESETS
+        .iter()
+        .position(|(number, _)| *number == preset)
+        .unwrap_or(0) as i32
+}
+
+/// What a knob's value is written as.
+fn knob_text(knob: &Knob, value: f32) -> String {
+    let value = if value.is_finite() {
+        value.clamp(knob.range.0, knob.range.1)
+    } else {
+        knob.range.0
+    };
+    if knob.whole {
+        format!("{}", value.round() as i64)
+    } else {
+        format!("{value:.3}")
+    }
+}
+
 /// What the page says about frame generation, and what its box does.
 struct FrameGenerationNote {
     /// What this session is.
@@ -362,6 +501,8 @@ unsafe extern "C" fn draw(_runtime: *mut c_void) {
     let begin_disabled: BeginDisabledFn = std::mem::transmute(*table.add(BEGIN_DISABLED));
     let end_disabled: VoidFn = std::mem::transmute(*table.add(END_DISABLED));
     let released: BoolFn = std::mem::transmute(*table.add(IS_ITEM_DEACTIVATED_AFTER_EDIT));
+    let button: ButtonFn = std::mem::transmute(*table.add(SMALL_BUTTON));
+    let header: HeaderFn = std::mem::transmute(*table.add(COLLAPSING_HEADER));
     let say = |line: &str| {
         let range = line.as_bytes().as_ptr_range();
         text(range.start as *const c_char, range.end as *const c_char);
@@ -533,6 +674,159 @@ unsafe extern "C" fn draw(_runtime: *mut c_void) {
         )),
         None => say("Frame generation is not running in this session."),
     }
+
+    separator();
+
+    // Everything else is closed until asked for: values the mod holds at
+    // the one that was measured, for judging the picture against another.
+    if !header(c"Expert settings".as_ptr(), 0) {
+        return;
+    }
+    let toggle = |label: &CStr, key: &str, now: bool| {
+        let mut value = now;
+        if checkbox(label.as_ptr(), &mut value) {
+            write(key, if value { "1" } else { "0" }.to_string());
+        }
+    };
+    let number = |pending: &mut Pending, index: usize| {
+        let knob = &KNOBS[index];
+        let mut value = pending.knobs[index].unwrap_or((knob.read)(&settings));
+        let changed = if knob.whole {
+            let mut whole = value.round() as i32;
+            let changed = slider_int(
+                knob.label.as_ptr(),
+                &mut whole,
+                knob.range.0 as i32,
+                knob.range.1 as i32,
+                c"%d".as_ptr(),
+                knob.flags,
+            );
+            value = whole as f32;
+            changed
+        } else {
+            slider_float(
+                knob.label.as_ptr(),
+                &mut value,
+                knob.range.0,
+                knob.range.1,
+                c"%.3f".as_ptr(),
+                knob.flags,
+            )
+        };
+        if changed {
+            pending.knobs[index] = Some(value);
+            pending.frames = PENDING_FRAMES;
+        }
+        if released() {
+            write(knob.key, knob_text(knob, value));
+        }
+    };
+
+    say("What the mod holds at the value measured for this game. Each applies within a second.");
+    say("A wrong value gives a wrong picture, not a crash. Ctrl+click a slider to type a number.");
+    say(if settings.expert_changed() {
+        "Some expert_ keys are not as shipped."
+    } else {
+        "Every expert_ key is as shipped."
+    });
+    if button(c"Put the expert_ keys back as shipped".as_ptr()) {
+        match crate::config::write_keys(crate::config::EXPERT) {
+            Ok(()) => crate::log!("[cmp] settings page: put the expert keys back as shipped"),
+            Err(error) => {
+                crate::log!("[cmp] settings page: could not put the expert keys back: {error}")
+            }
+        }
+        pending.knobs = [None; KNOBS.len()];
+    }
+
+    separator();
+    say("Jitter: the sub-pixel camera offset DLSS builds detail from.");
+    toggle(
+        c"Jitter the camera",
+        "expert_jitter",
+        settings.expert_jitter,
+    );
+    number(&mut pending, JITTER_PIXELS);
+    number(&mut pending, JITTER_PHASES);
+    say("NVIDIA's guide gives 8 phases divided by the square of the render scale: 8 at 1.0, 18 at 0.667, 32 at 0.5.");
+    number(&mut pending, JITTER_REPORT_X);
+    number(&mut pending, JITTER_REPORT_Y);
+    say("Shipped as 1 and -1. The wrong sign on an axis blurs and shimmers along it.");
+    let (x, y) = crate::native::last_jitter();
+    say(&format!(
+        "Last offset given to the engine: ({x:+.3}, {y:+.3}) render pixels; {} given so far.",
+        crate::native::written()
+    ));
+
+    separator();
+    say("Motion vectors, as DLSS and frame generation are given them.");
+    number(&mut pending, MV_DEJITTER);
+    number(&mut pending, MV_SCALE_X);
+    number(&mut pending, MV_SCALE_Y);
+    say("Shipped as 0, 1 and 1. Too long or too short smears or ghosts whatever moves.");
+
+    separator();
+    say("DLSS. Changing any of these rebuilds it, which shows as one rough frame.");
+    let last = PRESETS.len() as i32 - 1;
+    let mut position = pending
+        .preset
+        .unwrap_or_else(|| preset_position(settings.dlss_preset))
+        .clamp(0, last);
+    if slider_int(
+        c"Model preset (dlss_preset)".as_ptr(),
+        &mut position,
+        0,
+        last,
+        PRESETS[position as usize].1.as_ptr(),
+        0,
+    ) {
+        pending.preset = Some(position);
+        pending.frames = PENDING_FRAMES;
+    }
+    if released() {
+        write(
+            "dlss_preset",
+            PRESETS[position.clamp(0, last) as usize].0.to_string(),
+        );
+    }
+    toggle(
+        c"The colour is HDR",
+        "expert_dlss_hdr",
+        settings.expert_dlss_hdr,
+    );
+    toggle(
+        c"The depth buffer is inverted",
+        "expert_dlss_depth_inverted",
+        settings.expert_dlss_depth_inverted,
+    );
+    toggle(
+        c"DLSS works out the exposure",
+        "expert_dlss_auto_exposure",
+        settings.expert_dlss_auto_exposure,
+    );
+    toggle(
+        c"The motion vectors carry the jitter",
+        "expert_dlss_mv_jittered",
+        settings.expert_dlss_mv_jittered,
+    );
+    say("Shipped as on, on, on and off.");
+
+    separator();
+    say("The game's own renderer.");
+    number(&mut pending, ALPHA_UNROLL);
+    say("The game checkerboards transparency between two distances; a number above 0 holds both there.");
+    toggle(
+        c"Stop reflections and contact shadows dithering (undither)",
+        "undither",
+        settings.undither,
+    );
+    say("Costs a little banding. Turning it back off needs a restart of the game.");
+    toggle(
+        c"Texture mip bias for the render scale (mip_bias)",
+        "mip_bias",
+        settings.mip_bias != 0,
+    );
+    say("Read when the game starts: restart the game after changing it.");
 }
 
 #[cfg(test)]
@@ -550,15 +844,84 @@ mod tests {
                 GET_VERSION,
                 SEPARATOR,
                 TEXT_UNFORMATTED,
+                SMALL_BUTTON,
                 CHECKBOX,
                 SLIDER_FLOAT,
                 SLIDER_INT,
+                COLLAPSING_HEADER,
                 BEGIN_DISABLED,
                 END_DISABLED,
                 IS_ITEM_DEACTIVATED_AFTER_EDIT
             ],
-            [2, 80, 103, 115, 144, 149, 279, 280, 295]
+            [2, 80, 103, 112, 115, 144, 149, 188, 279, 280, 295]
         );
+    }
+
+    /// Every expert slider is a key the page can put back, sits at the index
+    /// the page draws it by, and writes a value the parser reads as the same
+    /// one. The expert keys that are not sliders are the page's boxes.
+    #[test]
+    fn the_expert_sliders_are_expert_keys_and_write_what_they_show() {
+        for (index, key) in [
+            (JITTER_PIXELS, "expert_jitter_pixels"),
+            (JITTER_PHASES, "expert_jitter_phases"),
+            (JITTER_REPORT_X, "expert_jitter_report_x"),
+            (JITTER_REPORT_Y, "expert_jitter_report_y"),
+            (MV_DEJITTER, "expert_mv_dejitter"),
+            (MV_SCALE_X, "expert_mv_scale_x"),
+            (MV_SCALE_Y, "expert_mv_scale_y"),
+            (ALPHA_UNROLL, "expert_alpha_unroll"),
+        ] {
+            assert_eq!(KNOBS[index].key, key);
+        }
+        let shipped = crate::config::Config::default();
+        for knob in &KNOBS {
+            let (_, default) = crate::config::EXPERT
+                .iter()
+                .find(|(key, _)| *key == knob.key)
+                .unwrap_or_else(|| panic!("{} is not an expert key", knob.key));
+            // As shipped the slider stands where the file says.
+            assert_eq!(
+                (knob.read)(&shipped),
+                default.parse::<f32>().unwrap(),
+                "{}",
+                knob.key
+            );
+            assert!(knob.range.0 < knob.range.1);
+            // Both ends and the middle are written as themselves.
+            for value in [
+                knob.range.0,
+                knob.range.1,
+                (knob.range.0 + knob.range.1) / 2.0,
+            ] {
+                let text = knob_text(knob, value);
+                let back = text.parse::<f32>().unwrap();
+                assert!(
+                    (back - value).abs() <= 0.5,
+                    "{} wrote {text} for {value}",
+                    knob.key
+                );
+            }
+        }
+        // Out of range and nonsense are written as something in range.
+        assert_eq!(knob_text(&KNOBS[JITTER_PHASES], 9000.0), "256");
+        assert_eq!(knob_text(&KNOBS[JITTER_PHASES], 0.2), "1");
+        assert_eq!(knob_text(&KNOBS[JITTER_PIXELS], f32::NAN), "0.000");
+        assert_eq!(knob_text(&KNOBS[MV_SCALE_X], -1.0), "-1.000");
+    }
+
+    #[test]
+    fn the_preset_slider_stands_on_the_presets_dlss_is_asked_for() {
+        assert_eq!(preset_position(0), 0);
+        assert_eq!(preset_position(10), 1);
+        assert_eq!(preset_position(13), 4);
+        // A number that is refused is the driver's choice, as in `dlss`.
+        assert_eq!(preset_position(5), 0);
+        assert_eq!(preset_position(-3), 0);
+        for (number, name) in PRESETS {
+            // The name is handed to ImGui as a format string.
+            assert!(!name.to_bytes().contains(&b'%'), "preset {number}");
+        }
     }
 
     #[test]

@@ -170,6 +170,16 @@ The page edits the same ini file. Its render scale slider snaps to 0.5,
 0.58, 0.667, 0.75, 0.85 and 1.0; its frame generation box writes `fg` and
 says when a restart is needed.
 
+At the end of the file, and under **Expert settings** on that page, are the
+`expert_` keys: the jitter (on or off, its width, its length, the sign DLSS
+is told), the motion vector scale, what DLSS is told about its inputs, and
+the distance at which the game checkerboards transparency. They are the
+values the mod otherwise holds fixed, for trying a different one against the
+picture while the game runs. As shipped they change nothing, a wrong one
+gives a wrong picture and not a crash, and the page has a button that puts
+them all back. A file written by an earlier version does not list them; they
+are added to it the first time the page changes one, or can be typed in.
+
 ## Companion tools
 
 All three are optional, none is included here, and each was verified in the
