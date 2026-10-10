@@ -2411,6 +2411,7 @@ unsafe fn offset_the_engines_camera() {
     crate::tune::unroll(config.expert_alpha_unroll);
     crate::tune::mip_bias(crate::hijack::mip_bias_bank());
     report_sampler_biases(&config);
+    crate::tune::note_sampler_override();
     crate::tune::undither(config.undither);
     // Cheap, and it is what makes the render resolution a live setting: the
     // engine rebuilds its targets by itself once the two ratios it keeps
@@ -3004,8 +3005,14 @@ unsafe extern "system" fn hook_create_dsv(
 /// the bank; whether a sampler was then actually created with the bias asked
 /// for is seen here, in the description handed to `CreateSampler`, and
 /// nowhere else.
-static SAMPLER_BIASES: [(AtomicU32, AtomicU32); 8] =
-    [const { (AtomicU32::new(u32::MAX), AtomicU32::new(0)) }; 8];
+///
+/// Room for every value the engine makes. It builds fifteen banks, and each
+/// holds six groups for its dynamic resolution whose base bias is log2 of a
+/// scale less one, so there are about a hundred distinct figures. With room
+/// for eight, as this had, the list was the first eight the engine happened
+/// to create and said nothing about any bank after the first.
+static SAMPLER_BIASES: [(AtomicU32, AtomicU32); 128] =
+    [const { (AtomicU32::new(u32::MAX), AtomicU32::new(0)) }; 128];
 static SAMPLERS_LOOKED_AT: AtomicU32 = AtomicU32::new(0);
 const SAMPLERS_TO_LOOK_AT: u32 = 8192;
 
@@ -3043,16 +3050,25 @@ fn report_sampler_biases(config: &crate::config::Config) {
     if distinct == 0 || SAID.swap(distinct, Ordering::Relaxed) == distinct {
         return;
     }
-    let seen: Vec<String> = SAMPLER_BIASES
+    // From no bias down to the sharpest, then the positive ones.
+    let mut seen: Vec<(f32, u32)> = SAMPLER_BIASES
         .iter()
         .filter(|(value, _)| value.load(Ordering::Relaxed) != u32::MAX)
         .map(|(value, count)| {
-            format!(
-                "{:+.3} on {}",
+            (
                 f32::from_bits(value.load(Ordering::Relaxed)),
-                count.load(Ordering::Relaxed)
+                count.load(Ordering::Relaxed),
             )
         })
+        .collect();
+    seen.sort_by(|a, b| {
+        (a.0 > 0.0)
+            .cmp(&(b.0 > 0.0))
+            .then(b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    let seen: Vec<String> = seen
+        .iter()
+        .map(|(bias, count)| format!("{bias:+.3} x{count}"))
         .collect();
     crate::log!(
         "[tun] mip bias observed: of the first {} samplers the engine created, the LOD biases \

@@ -84,11 +84,19 @@ pub struct Config {
     /// Which of the engine's fifteen sampler banks every material binds
     /// through, which is the only texture mip bias it has. 0 leaves the
     /// engine's own choice, bank 0: no bias, however small the scene is
-    /// rendered. 1 is the bias the render ratio wants, log2 of
-    /// `render_scale` as it reads at start-up: bank 1 is rebuilt for it and
-    /// selected, and at 1.0 nothing is built or selected. Read at start-up.
+    /// rendered. 1, as shipped, is the bias the mod works out: log2 of
+    /// `render_scale` as it reads at start-up, less `mip_bias_extra` levels.
+    /// Bank 1 is rebuilt for it and selected, and where the two come to no
+    /// bias nothing is built or selected. Read at start-up.
     /// See `hijack::mip_bias_bank` and `tune::prepare_exact_bias`.
     pub mip_bias: u32,
+    /// With `mip_bias = 1`, how many mip levels sharper than log2 of the
+    /// render ratio the bias is built: 0 to 2. An upscaler that accumulates
+    /// frames resolves more texture detail than one frame holds, and 1,
+    /// which ships, is the usual advice for one; it is also what the
+    /// engine's own ladder of biases is built on. Read at start-up, with
+    /// `mip_bias`.
+    pub mip_bias_extra: f32,
     /// How strongly the resolved picture is sharpened, 0 to 1, by a pass of
     /// this library's own between DLSS and the engine's target; 0 is no
     /// pass at all. Live. See `sharpen.rs`.
@@ -285,7 +293,8 @@ impl Config {
     const DEFAULT: Config = Config {
         render_scale: crate::hijack::DEFAULT_RATIO,
         render_scale_asked: crate::hijack::DEFAULT_RATIO,
-        mip_bias: 0,
+        mip_bias: 1,
+        mip_bias_extra: 1.0,
         sharpen: 0.0,
         undither: false,
         dlss_preset: 0,
@@ -373,6 +382,8 @@ impl Config {
 /// What `sharpen` is held to, and where its slider on the settings page
 /// ends.
 pub const SHARPEN_RANGE: (f32, f32) = (0.0, 1.0);
+/// The same for `mip_bias_extra`, in mip levels.
+pub const MIP_BIAS_EXTRA_RANGE: (f32, f32) = (0.0, 2.0);
 
 /// What the expert keys are held to, which is also where their sliders on
 /// the settings page end.
@@ -412,6 +423,7 @@ impl Default for Config {
 const KEYS: &[&str] = &[
     "render_scale",
     "mip_bias",
+    "mip_bias_extra",
     "sharpen",
     "undither",
     "dlss_preset",
@@ -795,11 +807,12 @@ fn reload() {
     // works from that are not in the file are constants and are not repeated
     // here; each module logs what it observed.
     crate::log!(
-        "[cfg] render_scale={} mip_bias={} sharpen={} undither={} preset={} | fg={} x{} \
+        "[cfg] render_scale={} mip_bias={} extra={} sharpen={} undither={} preset={} | fg={} x{} \
          hudless={} occurrence={} survey={} boost={} latency={} mvec=({},{},{}) | \
          verbose={} perf={} mv_probe={} dred={} debug_layer={} sl_log={}",
         parsed.render_scale,
         parsed.mip_bias,
+        parsed.mip_bias_extra,
         parsed.sharpen,
         parsed.undither,
         parsed.dlss_preset,
@@ -876,6 +889,11 @@ fn parse_reporting(text: &str) -> (Config, Vec<Ignored>) {
             "mip_bias" => {
                 if let Ok(parsed) = value.parse::<u32>() {
                     config.mip_bias = parsed.min(14);
+                }
+            }
+            "mip_bias_extra" => {
+                if let Some(parsed) = ranged(value, MIP_BIAS_EXTRA_RANGE) {
+                    config.mip_bias_extra = parsed;
                 }
             }
             "sharpen" => {
@@ -1019,13 +1037,27 @@ const SHIPPED: &str = "\
 #               DLSS reconstructs the rest. 0.50 to 1.00. 1.0 is DLAA,
 #               0.667 Quality, 0.58 Balanced, 0.5 Performance. The game's own
 #               Image Quality option does nothing while the mod is loaded.
+#               It changes while you play, but for the best picture RESTART
+#               THE GAME after changing it: how sharply textures are sampled
+#               (mip_bias, below) is worked out from it when the game starts,
+#               and until a restart textures stay tuned for the old value.
 render_scale = 0.667
 
-# mip_bias      1 sharpens texture sampling to suit the render scale, 0
-#               leaves it as the game has it. Read when the game starts, for
-#               the render_scale set then: restart the game after changing
-#               either for the bias to follow.
-mip_bias = 0
+# mip_bias      1 lets the mod work out how sharply textures are sampled, to
+#               suit the render scale: without it a scene rendered small
+#               has soft textures however well DLSS rebuilds its edges. 0
+#               leaves texture sampling as the game has it. Read when the
+#               game starts, for the render_scale set then: restart the game
+#               after changing either.
+mip_bias = 1
+
+# mip_bias_extra  with mip_bias = 1, how many mip levels sharper than the
+#               render scale alone asks for: 0.0 to 2.0. DLSS builds its
+#               picture from many frames and can use more texture detail
+#               than one frame holds; 1.0 is the usual advice for it. Lower
+#               it if fine patterns shimmer. Read when the game starts, like
+#               mip_bias.
+mip_bias_extra = 1.0
 
 # sharpen       how strongly the picture is sharpened after DLSS, which does
 #               not sharpen by itself: 0.0 to 1.0, and 0 is off. Done before
@@ -1247,6 +1279,9 @@ mod tests {
         assert_eq!(parsed.fg_log_level, 1);
         assert_eq!(parsed.dlss_preset, 0);
         assert_eq!(parsed.sharpen, 0.0);
+        // The texture mip bias is worked out by the mod as shipped.
+        assert_eq!(parsed.mip_bias, 1);
+        assert_eq!(parsed.mip_bias_extra, 1.0);
         assert!(!parsed.fg_mvec_jittered);
         assert!(!parsed.fg_mvec_dilated);
         // The five frame generation experiments, which as shipped change
@@ -1436,6 +1471,10 @@ mod tests {
         assert_eq!(parsed.render_scale, crate::hijack::LARGEST);
         let (parsed, _) = parse_reporting("sharpen = 3\n");
         assert_eq!(parsed.sharpen, 1.0);
+        let (parsed, _) = parse_reporting("mip_bias_extra = 9\n");
+        assert_eq!(parsed.mip_bias_extra, 2.0);
+        let (parsed, _) = parse_reporting("mip_bias_extra = -1\n");
+        assert_eq!(parsed.mip_bias_extra, 0.0);
         let (parsed, _) = parse_reporting("sharpen = -1\n");
         assert_eq!(parsed.sharpen, 0.0);
     }

@@ -248,6 +248,84 @@ pub fn mip_bias(bank: u32) {
 }
 
 // ---------------------------------------------------------------------------
+// The engine's own choice of sampler at each draw, which is not the bank's
+// ---------------------------------------------------------------------------
+
+/// `mpPrimaryScene` in the render config, and the attribute word of a scene.
+const PRIMARY_SCENE: usize = 0x1f450;
+const SCENE_ATTRIBUTE: usize = 0x58;
+/// The attribute bit the material bind tests before it swaps samplers.
+const DYNAMIC_SAMPLERS: u32 = 0x0080_0000;
+/// `mDynamicResolutionMode` in the render config, 0 or 1, which is what
+/// that swap picks its group by.
+const DYNAMIC_RESOLUTION_MODE: usize = 0x7b3b4;
+
+/// Say whether the engine replaces the samplers a material was loaded with,
+/// when that is first known and whenever it changes.
+///
+/// Read in a disassembler and not yet seen to happen: the material bind,
+/// `FUN_14235f450`, tests bit 0x800000 of the scene's attribute, and with it
+/// set binds, in place of the material's own samplers 0 to 5, 10 and 11, one
+/// of six groups of sampler bank 0 -- the groups the engine keeps for its
+/// dynamic resolution, whose biases are log2 of a scale less one. Bank 0,
+/// whatever `SAMPLER_BANK` says: so with the bit set the bias this module
+/// builds does not reach those samplers, which are the ones textures are
+/// read through. Whether the bit is ever set on this platform could not be
+/// told from the code. This is the line that tells.
+///
+/// The scene read is the configuration's primary scene; the bind tests the
+/// scene of its own draw context, which is taken to be the same one.
+pub fn note_sampler_override() {
+    static CALLS: AtomicU32 = AtomicU32::new(0);
+    static SAID: AtomicU32 = AtomicU32::new(u32::MAX);
+    // Called several times a frame, and what it reads is validated with a
+    // system call: looked at every few hundred calls.
+    if !CALLS.fetch_add(1, Ordering::Relaxed).is_multiple_of(512) {
+        return;
+    }
+    unsafe {
+        let Some(config) = crate::hijack::config_object() else {
+            return;
+        };
+        if !readable(config + PRIMARY_SCENE, 8) || !readable(config + DYNAMIC_RESOLUTION_MODE, 4) {
+            return;
+        }
+        let scene = ((config + PRIMARY_SCENE) as *const usize).read_unaligned();
+        if scene == 0 || !readable(scene + SCENE_ATTRIBUTE, 4) {
+            return;
+        }
+        let attribute = ((scene + SCENE_ATTRIBUTE) as *const u32).read_unaligned();
+        let mode = ((config + DYNAMIC_RESOLUTION_MODE) as *const u32).read_unaligned();
+        let swapped = attribute & DYNAMIC_SAMPLERS != 0;
+        let state = u32::from(swapped) | ((mode & 0xff) << 1);
+        if SAID.swap(state, Ordering::Relaxed) == state {
+            return;
+        }
+        if swapped {
+            crate::log!(
+                "[tun] the primary scene {scene:#x} has attribute {attribute:#010x}: bit \
+                 0x800000 is SET. As the engine's material bind reads, samplers 0 to 5, 10 and \
+                 11 of every material are then replaced at each draw by group {mode} of sampler \
+                 bank 0 (mDynamicResolutionMode = {mode}), a bias of {}, whatever bank \
+                 mip_bias selects: the bias this mod builds does NOT reach those samplers",
+                match mode {
+                    0 => "-1.000",
+                    1 => "-1.074",
+                    _ => "an unknown amount",
+                }
+            );
+        } else {
+            crate::log!(
+                "[tun] the primary scene {scene:#x} has attribute {attribute:#010x}: bit \
+                 0x800000 is clear (mDynamicResolutionMode = {mode}). As the engine's material \
+                 bind reads, materials then keep the samplers of the bank that was selected \
+                 when they loaded, so the bias mip_bias builds is the one in force for them"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Sharpening, which DLSS 4 no longer does
 // ---------------------------------------------------------------------------
 
@@ -372,6 +450,8 @@ static REBUILT: AtomicBool = AtomicBool::new(false);
 /// The render ratio the instruction was rewritten for, as bits; 0 if it was
 /// not.
 static BUILT_FOR: AtomicU32 = AtomicU32::new(0);
+/// The bias that rewrite makes, as bits.
+static BUILT_BIAS: AtomicU32 = AtomicU32::new(0);
 
 /// A ratio this near 1.0 wants a bias under a hundredth of a mip level,
 /// which is none.
@@ -384,7 +464,12 @@ const NO_BIAS_FROM: f32 = 0.995;
 /// be selected for `mip_bias = 1`.
 pub(crate) fn bias_built() -> Option<(f32, f32)> {
     let built = BUILT_FOR.load(Ordering::Relaxed);
-    (built != 0).then(|| (f32::from_bits(built), f32::from_bits(built).log2()))
+    (built != 0).then(|| {
+        (
+            f32::from_bits(built),
+            f32::from_bits(BUILT_BIAS.load(Ordering::Relaxed)),
+        )
+    })
 }
 
 /// What is to be done about bank 1's bias.
@@ -395,6 +480,7 @@ pub(crate) enum Bias {
     NotWanted {
         mip_bias: u32,
         ratio: f32,
+        extra: f32,
     },
     /// The constant it starts from does not read 2.0: the data is not in
     /// place yet, or the instruction has already been rewritten.
@@ -409,6 +495,7 @@ pub(crate) struct BiasPlan {
     literal: usize,
     value: f32,
     ratio: f32,
+    extra: f32,
 }
 
 /// The `[start, end)` of the section of the loaded image that holds `rva`.
@@ -483,6 +570,22 @@ unsafe fn constant_near(base: usize, like: usize, wanted: f32) -> Option<(usize,
     best
 }
 
+/// The constant bank 1 has to be built from, as `-log2(constant)`, for the
+/// bias a render ratio and `mip_bias_extra` ask for together: log2 of the
+/// ratio, less the extra levels. `None` when that is next to no bias, or
+/// the ratio is not one.
+fn bank_one_constant(ratio: f32, extra: f32) -> Option<f32> {
+    let bias = ratio.log2() - extra;
+    ((0.3..=1.0).contains(&ratio) && bias <= NO_BIAS_FROM.log2()).then(|| (-bias).exp2())
+}
+
+/// The texture mip bias a render ratio and `mip_bias_extra` ask for, or
+/// `None` for none. What the settings page holds against `bias_built` to
+/// say whether the game has to be restarted.
+pub(crate) fn bias_wanted(ratio: f32, extra: f32) -> Option<f32> {
+    bank_one_constant(ratio, extra).map(|constant| -constant.log2())
+}
+
 /// Work out how to make bank 1 the bias this render ratio wants.
 ///
 /// The banks are a fixed ladder -- `-log2(2.0)`, `-log2(2.5)`, and so on --
@@ -505,13 +608,31 @@ unsafe fn constant_near(base: usize, like: usize, wanted: f32) -> Option<(usize,
 ///
 /// # Safety
 /// `base` must be the game's image, with `BANK_ONE_SOURCE` already checked.
-pub(crate) unsafe fn prepare_exact_bias(base: usize, mip_bias: u32, ratio: f32) -> Bias {
+pub(crate) unsafe fn prepare_exact_bias(
+    base: usize,
+    mip_bias: u32,
+    ratio: f32,
+    extra: f32,
+) -> Bias {
     // `ratio` is `render_scale` as it reads when the detours go in, which is
-    // 0.5 to 1.0 by the time it leaves `config`. log2 of a ratio at or next to
-    // 1.0 is no bias: nothing is built for it.
-    if mip_bias != 1 || !(0.3..NO_BIAS_FROM).contains(&ratio) {
-        return Bias::NotWanted { mip_bias, ratio };
-    }
+    // 0.5 to 1.0 by the time it leaves `config`. The bias is log2 of it,
+    // which is what rendering small costs the textures, less
+    // `mip_bias_extra` levels: an upscaler that accumulates jittered frames
+    // resolves more texture detail than one frame holds, and the usual
+    // advice for one is a level sharper than the ratio alone asks for. The
+    // engine's own ladder is that advice -- its rungs are log2 of a scale
+    // less one -- for the scales it has rungs for. Next to no bias is none:
+    // nothing is built for it.
+    let Some(wanted) = (mip_bias == 1)
+        .then(|| bank_one_constant(ratio, extra))
+        .flatten()
+    else {
+        return Bias::NotWanted {
+            mip_bias,
+            ratio,
+            extra,
+        };
+    };
     let instruction = base + BANK_ONE_SOURCE;
     let current = ((instruction + 4) as *const i32).read_unaligned();
     let source = (instruction as i64 + 8 + current as i64) as usize;
@@ -521,7 +642,6 @@ pub(crate) unsafe fn prepare_exact_bias(base: usize, mip_bias: u32, ratio: f32) 
         return Bias::NotReady;
     }
 
-    let wanted = 1.0 / ratio;
     let Some((literal, value)) = constant_near(base, source, wanted) else {
         return Bias::Unavailable(format!(
             "no constant within one per cent of {wanted:.4} was found in the image to build \
@@ -549,6 +669,7 @@ pub(crate) unsafe fn prepare_exact_bias(base: usize, mip_bias: u32, ratio: f32) 
         literal,
         value,
         ratio,
+        extra,
     })
 }
 
@@ -562,15 +683,18 @@ pub(crate) fn bias_written(bias: &Bias, game_was_running: bool) {
         Bias::Ready(plan) => {
             REBUILT.store(true, Ordering::Relaxed);
             BUILT_FOR.store(plan.ratio.to_bits(), Ordering::Relaxed);
+            BUILT_BIAS.store((-plan.value.log2()).to_bits(), Ordering::Relaxed);
             crate::log!(
                 "[tun] the instruction that builds sampler bank 1 now loads {:.4} from {:#x} \
                  instead of 2.0, which makes a mip bias of {:+.3} for the render_scale read at \
-                 start-up, {:.3}. The bias is fixed for this session: restart the game for it \
-                 to follow a different render_scale. {}",
+                 start-up, {:.3}, and mip_bias_extra, {:.2}. The bias is fixed for this \
+                 session: restart the game for it to follow a different render_scale or \
+                 mip_bias_extra. {}",
                 plan.value,
                 plan.literal,
                 -plan.value.log2(),
                 plan.ratio,
+                plan.extra,
                 if game_was_running {
                     "The game's own code was already running when this was written: if it \
                      had built its sampler banks by then, bank 1 has the stock -1.0 instead"
@@ -580,11 +704,16 @@ pub(crate) fn bias_written(bias: &Bias, game_was_running: bool) {
                 }
             );
         }
-        Bias::NotWanted { mip_bias: 1, ratio } => crate::log!(
-            "[tun] mip_bias = 1 and the render_scale read at start-up is {ratio:.3}: log2 of \
-             that is no bias, so the instruction is left alone, sampler bank 1 is not selected \
-             and the engine's bank 0 (no bias) stays in use this session. Restart the game for \
-             the bias to follow a different render_scale"
+        Bias::NotWanted {
+            mip_bias: 1,
+            ratio,
+            extra,
+        } => crate::log!(
+            "[tun] mip_bias = 1, the render_scale read at start-up is {ratio:.3} and \
+             mip_bias_extra is {extra:.2}: together that is no bias, so the instruction is \
+             left alone, sampler bank 1 is not selected and the engine's bank 0 (no bias) \
+             stays in use this session. Restart the game for the bias to follow a different \
+             render_scale or mip_bias_extra"
         ),
         Bias::NotWanted { .. } => {}
         Bias::NotReady => crate::log!(
@@ -596,5 +725,46 @@ pub(crate) fn bias_written(bias: &Bias, game_was_running: bool) {
             "[tun] the exact mip bias was not built: {why}. Sampler bank 1 is not selected and \
              the engine's bank 0 (no bias) stays in use this session"
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bank_one_constant;
+
+    fn bias(ratio: f32, extra: f32) -> Option<f32> {
+        bank_one_constant(ratio, extra).map(|constant| -constant.log2())
+    }
+
+    fn near(found: Option<f32>, wanted: f32) -> bool {
+        found.is_some_and(|found| (found - wanted).abs() < 0.002)
+    }
+
+    /// With no extra the bias is log2 of the ratio, as it was before
+    /// `mip_bias_extra` existed, and none at a ratio of 1.0.
+    #[test]
+    fn without_extra_the_bias_is_the_ratios() {
+        assert!(near(bias(0.667, 0.0), -0.584));
+        assert!(near(bias(0.58, 0.0), -0.786));
+        assert!(near(bias(0.5, 0.0), -1.0));
+        assert_eq!(bias(1.0, 0.0), None);
+        assert_eq!(bias(0.999, 0.0), None);
+    }
+
+    /// The extra is that many levels on top, at every ratio: with 1.0 the
+    /// figures are the rungs of the engine's own ladder, and DLAA gets one.
+    #[test]
+    fn the_extra_is_levels_on_top() {
+        assert!(near(bias(0.667, 1.0), -1.584));
+        assert!(near(bias(0.5, 1.0), -2.0));
+        assert!(near(bias(1.0, 1.0), -1.0));
+        assert!(near(bias(1.0, 0.5), -0.5));
+        assert!(near(bias(0.75, 2.0), -2.415));
+        // The constants: 3.0 for Quality, the stock 2.0 for DLAA.
+        assert!(bank_one_constant(0.667, 1.0).is_some_and(|c| (c - 2.998).abs() < 0.01));
+        assert_eq!(bank_one_constant(1.0, 1.0), Some(2.0));
+        // Not a ratio.
+        assert_eq!(bias(0.0, 1.0), None);
+        assert_eq!(bias(1.7, 1.0), None);
     }
 }
