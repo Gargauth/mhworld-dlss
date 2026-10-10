@@ -597,39 +597,11 @@ unsafe extern "C" fn draw(_runtime: *mut c_void) {
         None => say("The engine's render ratio has not been read yet."),
     }
     say("The game's own Image Quality option does nothing while the mod is loaded.");
-    // The texture mip bias: whether there is one, and how much sharper than
-    // the render scale alone asks for. The mod works the figure out; both
-    // are read when the game starts.
-    let mut bias = settings.mip_bias != 0;
-    if checkbox(c"Texture mip bias for the render scale".as_ptr(), &mut bias) {
-        write("mip_bias", if bias { "1" } else { "0" }.to_string());
-    }
-    let range = crate::config::MIP_BIAS_EXTRA_RANGE;
-    let mut extra = pending.mip_bias_extra.unwrap_or(settings.mip_bias_extra);
-    if slider_float(
-        c"Extra texture sharpness, in mip levels".as_ptr(),
-        &mut extra,
-        range.0,
-        range.1,
-        c"%.2f".as_ptr(),
-        0,
-    ) {
-        pending.mip_bias_extra = Some(extra);
-        pending.frames = PENDING_FRAMES;
-    }
-    if released() {
-        let extra = if extra.is_finite() {
-            extra.clamp(range.0, range.1)
-        } else {
-            range.0
-        };
-        write("mip_bias_extra", format!("{extra:.2}"));
-    }
-    say("The mod works the bias out from the render scale. 1.0 extra is the usual advice for DLSS; lower it if fine patterns shimmer.");
     // The texture mip bias is a start-up quantity: the engine builds its
     // samplers once. So what this session has is held against what the
     // settings ask for now, and the page says when only a restart will
-    // bring the two together.
+    // bring the two together. Its two controls are among the expert
+    // settings; this line is here because the render scale is what moves it.
     let built = crate::hijack::mip_bias_built().map(|(_, bias)| bias);
     if settings.mip_bias > 1 {
         say(&format!(
@@ -911,6 +883,37 @@ unsafe extern "C" fn draw(_runtime: *mut c_void) {
         settings.undither,
     );
     say("Costs a little banding. Turning it back off needs a restart of the game.");
+    // The texture mip bias: whether there is one, and how much sharper than
+    // the render scale alone asks for. The mod works the figure out; both
+    // are read when the game starts, and the line under the render scale is
+    // what says when a restart is owed.
+    let mut bias = settings.mip_bias != 0;
+    if checkbox(c"Texture mip bias for the render scale".as_ptr(), &mut bias) {
+        write("mip_bias", if bias { "1" } else { "0" }.to_string());
+    }
+    let range = crate::config::MIP_BIAS_EXTRA_RANGE;
+    let mut extra = pending.mip_bias_extra.unwrap_or(settings.mip_bias_extra);
+    if slider_float(
+        c"Extra texture sharpness, in mip levels".as_ptr(),
+        &mut extra,
+        range.0,
+        range.1,
+        c"%.2f".as_ptr(),
+        0,
+    ) {
+        pending.mip_bias_extra = Some(extra);
+        pending.frames = PENDING_FRAMES;
+    }
+    if released() {
+        let extra = if extra.is_finite() {
+            extra.clamp(range.0, range.1)
+        } else {
+            range.0
+        };
+        write("mip_bias_extra", format!("{extra:.2}"));
+    }
+    say("The mod works the bias out from the render scale. 1.0 extra is the usual advice for DLSS; lower it if fine patterns shimmer.");
+    say("Both are read when the game starts; the line under the render scale says when a restart is needed.");
 }
 
 #[cfg(test)]
