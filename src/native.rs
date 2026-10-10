@@ -294,17 +294,23 @@ pub fn write(x: f32, y: f32) -> bool {
 /// Shared by both callers -- the detour and the submission hook -- so they
 /// cannot disagree about what the sequence is.
 pub fn apply() -> bool {
+    let settings = crate::config::get();
     let index = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let (x, y) = crate::camera::jitter_pixels(index, JITTER_PHASES);
-    jitter(x * JITTER_PIXELS, y * JITTER_PIXELS)
+    let (x, y) = crate::camera::jitter_pixels(index, settings.expert_jitter_phases);
+    jitter(
+        x * settings.expert_jitter_pixels,
+        y * settings.expert_jitter_pixels,
+    )
 }
 
-/// Length of the Halton sequence before it repeats.
-const JITTER_PHASES: u32 = 32;
-/// Width of the jitter in render pixels: samples spread across one pixel,
-/// which is the usual choice. It was 0.5 for the external jitter, as a
-/// compromise for an artefact that path caused and this one does not.
-const JITTER_PIXELS: f32 = 1.0;
+/// Length of the Halton sequence before it repeats, as shipped:
+/// `expert_jitter_phases` is the key.
+pub(crate) const JITTER_PHASES: u32 = 32;
+/// Width of the jitter in render pixels, as shipped: samples spread across
+/// one pixel, which is the usual choice. It was 0.5 for the external jitter,
+/// as a compromise for an artefact that path caused and this one does not.
+/// `expert_jitter_pixels` is the key.
+pub(crate) const JITTER_PIXELS: f32 = 1.0;
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -342,7 +348,14 @@ static RAN: AtomicU64 = AtomicU64::new(0);
 unsafe extern "system" fn hook_camera_setup(camera: usize, pass: usize) -> u32 {
     let perf = crate::perf::start(crate::perf::Family::Camera);
     if JITTERING.load(Ordering::Relaxed) {
-        apply();
+        if crate::config::get().expert_jitter {
+            apply();
+        } else {
+            // `expert_jitter = 0`: nothing is written, the engine clears the
+            // two floats itself, and frame generation, which is told the
+            // offset last given, is told none.
+            LAST_JITTER.store(0, Ordering::Relaxed);
+        }
     }
     let count = RAN.fetch_add(1, Ordering::Relaxed);
     if count == 0 {

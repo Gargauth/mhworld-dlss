@@ -63,10 +63,13 @@ where they are.
 
 **The settings page.** With an add-on build, the mod adds a page to
 ReShade's overlay: open the overlay, go to the Add-ons tab and expand
-`mhw-dlss`. It has the render scale, the frame generation switches, the frame
+`mhw-dlss`. It has the render scale, sharpening, the frame generation switches, the frame
 multiplier and Reflex boost, and it shows the current render and output
-sizes. It edits `mhw-dlss.ini`, so the file stays the one place the settings
-live. The page was verified with ReShade 6.8.0 only; with a version whose
+sizes. Under **Expert settings**, closed until you open it, are the DLSS
+model preset and the `expert_` keys -- jitter, motion vectors, what DLSS is
+told, and a few of the game's own renderer settings -- with a button that
+puts the `expert_` keys back as shipped. It edits `mhw-dlss.ini`, so the file
+stays the one place the settings live. The page was verified with ReShade 6.8.0 only; with a version whose
 overlay interface differs, the page is simply absent.
 
 With frame generation on, ReShade's effects and overlay are applied to every

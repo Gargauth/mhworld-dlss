@@ -35,7 +35,8 @@
 //! engine's other sharpener, FidelityFX CAS, runs at the output resolution,
 //! but only when its DLSS upscale stage is not usable, and under this mod
 //! that stage always is. So `sharpen` below has no caller and no visible
-//! effect; it is kept as the record of where those fields are.
+//! effect; it is kept as the record of where those fields are. The `sharpen`
+//! setting is this library's own pass after the resolve, in `sharpen.rs`.
 //!
 //! **Patterns meant for the engine's filter.** Screen-space reflections are
 //! resolved with a dither and a g-buffer jitter, and contact shadows with

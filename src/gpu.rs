@@ -49,14 +49,16 @@ const MV_OFFSET: usize = 13;
 /// How `tGBuffer4` packs its two components: 2 is two half floats with
 /// horizontal in the high half. Measured with `mv_probe`.
 const MV_MODE: u32 = 2;
-/// How much of the jitter the decode adds back to the vectors: none. The
-/// engine applies its jitter matrix to the previous frame's projection as
-/// well as the current one, so its vectors are already jitter-free (see
-/// `native.rs`); adding the jitter here would apply it a second time.
-const MV_DEJITTER: f32 = 0.0;
-/// Multiplier on the jitter reported to DLSS: the projection shift is +ndc
-/// because this projection has w = -z, and the viewport then flips Y.
-const JITTER_REPORT: (f32, f32) = (1.0, -1.0);
+/// How much of the jitter the decode adds back to the vectors, as shipped:
+/// none. The engine applies its jitter matrix to the previous frame's
+/// projection as well as the current one, so its vectors are already
+/// jitter-free (see `native.rs`); adding the jitter here would apply it a
+/// second time. `expert_mv_dejitter` is the key.
+pub(crate) const MV_DEJITTER: f32 = 0.0;
+/// Multiplier on the jitter reported to DLSS, as shipped: the projection
+/// shift is +ndc because this projection has w = -z, and the viewport then
+/// flips Y. `expert_jitter_report_x` and `_y` are the keys.
+pub(crate) const JITTER_REPORT: (f32, f32) = (1.0, -1.0);
 
 static BUDGET: AtomicUsize = AtomicUsize::new(0);
 static REPORT_BUDGET: AtomicUsize = AtomicUsize::new(0);
@@ -1375,7 +1377,10 @@ pub(crate) unsafe fn resolve_at_slot(
     }
     keep_alive(&[colour, output, depth, motion]);
     let perf = crate::perf::start(crate::perf::Family::Evaluate);
-    let evaluated = crate::dlss::evaluate(
+    // Through `sharpen`, which is `dlss::evaluate` unless the settings ask
+    // for the result to be sharpened on its way into the target. The target
+    // is in unordered access here: the plan above put it there.
+    let evaluated = crate::sharpen::evaluate(
         this,
         &crate::dlss::Frame {
             colour: colour as *mut c_void,
@@ -1388,6 +1393,7 @@ pub(crate) unsafe fn resolve_at_slot(
             motion_scale,
             reset: false,
         },
+        true,
     );
     perf.stop();
     let back: Vec<D3D12_RESOURCE_BARRIER> = moves
@@ -1722,7 +1728,10 @@ unsafe fn run_dlss(this: *mut c_void, groups_x: u32, groups_y: u32) -> bool {
         (groups_x * 16).min(display.0),
         (groups_y * 16).min(display.1),
     );
-    let reported = JITTER_REPORT;
+    // The measured values of the jitter and motion vector arithmetic below,
+    // unless the expert keys say otherwise.
+    let expert = crate::config::get();
+    let reported = expert.expert_jitter_report;
 
     // Read the offset back out of the constant buffer this dispatch is using,
     // rather than from a value set aside when that buffer was written.
@@ -1851,9 +1860,10 @@ unsafe fn run_dlss(this: *mut c_void, groups_x: u32, groups_y: u32) -> bool {
     // projection shift is +ndc because this projection has w = -z, and the
     // viewport then flips y.
     //
-    // The decode is given this together with `MV_DEJITTER`, the fraction of
-    // it to add back to the vectors, which is zero: with the engine's own
-    // jitter its vectors are already jitter-free.
+    // The decode is given this together with `expert_mv_dejitter`, the
+    // fraction of it to add back to the vectors, which is zero as shipped
+    // (`MV_DEJITTER`): with the engine's own jitter its vectors are already
+    // jitter-free.
     let applied = (jitter_raw.0, -jitter_raw.1);
 
     // Everything that can be checked is checked here, before a single command
@@ -1897,7 +1907,12 @@ unsafe fn run_dlss(this: *mut c_void, groups_x: u32, groups_y: u32) -> bool {
     // not. Vectors half again too long send DLSS to the wrong part of its
     // history: what does not match is discarded, which aliases, and what does
     // is blended, which blurs. Both at once, which is what this looked like.
-    let mv_scale = (-(render.0 as f32) / 2.0, render.1 as f32 / 2.0);
+    //
+    // `expert_mv_scale_x` and `_y` multiply it, and are 1 as shipped.
+    let mv_scale = (
+        -(render.0 as f32) / 2.0 * expert.expert_mv_scale.0,
+        render.1 as f32 / 2.0 * expert.expert_mv_scale.1,
+    );
     let motion_engine = motion;
     let (motion, motion_scale) = match crate::mv::decode(
         this,
@@ -1907,7 +1922,7 @@ unsafe fn run_dlss(this: *mut c_void, groups_x: u32, groups_y: u32) -> bool {
         mv_scale,
         MV_MODE,
         applied,
-        MV_DEJITTER,
+        expert.expert_mv_dejitter,
     ) {
         Some(decoded) => (decoded as usize, (1.0, 1.0)),
         // The decode can fail, and then DLSS is handed the engine's own
@@ -2256,7 +2271,10 @@ unsafe fn run_dlss(this: *mut c_void, groups_x: u32, groups_y: u32) -> bool {
     });
 
     let perf = crate::perf::start(crate::perf::Family::Evaluate);
-    let evaluated = crate::dlss::evaluate(this, &frame);
+    // Through `sharpen`, as at the upscale stage. Not sharpened when the
+    // target's state was never observed: NGX is handed it as it is, and this
+    // library's own pass would be writing a texture it cannot vouch for.
+    let evaluated = crate::sharpen::evaluate(this, &frame, output_tracked);
     perf.stop();
     // Counted as a resolve once it is one. It was counted before the
     // evaluation, so an evaluation that failed every time still read, to the
@@ -2382,15 +2400,15 @@ unsafe fn offset_the_engines_camera() {
         return;
     }
     let config = crate::config::get();
-    // With a distance of zero, which is all this is ever given. That reads
-    // as "leave the engine's own distances alone" and is not quite what it
-    // does: `unroll` takes the engine's *far* distance as the original and
+    // With a distance of zero, unless `expert_alpha_unroll` gives one. Zero
+    // reads as "leave the engine's own distances alone" and is not quite what
+    // it does: `unroll` takes the engine's *far* distance as the original and
     // writes it to both fields, so the near one goes from 0 to 1e8 --
     // `[tun] alpha is drawn whole out to 100000000.0` in every session's
     // log. Kept exactly as it is because removing it would change the
     // picture that was verified; whether that picture is the one wanted is
     // an open question.
-    crate::tune::unroll(0.0);
+    crate::tune::unroll(config.expert_alpha_unroll);
     crate::tune::mip_bias(crate::hijack::mip_bias_bank());
     report_sampler_biases(&config);
     crate::tune::undither(config.undither);

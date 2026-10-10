@@ -7,11 +7,14 @@
 //!
 //! ## What is a setting and what is not
 //!
-//! Three kinds of key are read, and the file the mod writes (`SHIPPED`)
+//! Four kinds of key are read, and the file the mod writes (`SHIPPED`)
 //! groups them the same way:
 //!
 //! * settings somebody changes: the render scale, the mip bias, the DLSS
 //!   preset, frame generation and what goes with it;
+//! * expert keys, `expert_*`: values the mod otherwise holds at the one that
+//!   was measured -- the jitter, the motion vectors, what DLSS is told --
+//!   which as shipped are exactly that, so the file changes nothing;
 //! * diagnostics, all off by default, worth having for a bug report;
 //! * a few experiments on one open artefact of frame generation, which as
 //!   shipped change nothing.
@@ -86,6 +89,10 @@ pub struct Config {
     /// selected, and at 1.0 nothing is built or selected. Read at start-up.
     /// See `hijack::mip_bias_bank` and `tune::prepare_exact_bias`.
     pub mip_bias: u32,
+    /// How strongly the resolved picture is sharpened, 0 to 1, by a pass of
+    /// this library's own between DLSS and the engine's target; 0 is no
+    /// pass at all. Live. See `sharpen.rs`.
+    pub sharpen: f32,
     /// Stop the screen-space effects resolving their detail across frames
     /// with patterns only the engine's own temporal pass understands. Cannot
     /// be undone within a session.
@@ -207,6 +214,36 @@ pub struct Config {
     /// whole screen, which is the extreme; the mask is zero outside the box.
     pub fg_test_mask_box: f32,
 
+    // ----- expert ---------------------------------------------------------
+    //
+    // What the mod otherwise holds at a measured value. Each is that value
+    // as shipped, and the value and the reason for it are with the constant
+    // named in `DEFAULT`; they are keys so that the picture can be judged
+    // against a different one while the game runs. All live.
+    /// Offset the engine's camera by a sub-pixel amount each frame. Off, DLSS
+    /// is told what the camera then carries, which is read from the frame.
+    pub expert_jitter: bool,
+    /// How many render pixels the jitter samples are spread across.
+    pub expert_jitter_pixels: f32,
+    /// Length of the Halton sequence before it repeats.
+    pub expert_jitter_phases: u32,
+    /// Multiplier on the jitter DLSS is told, read from the frame's camera.
+    pub expert_jitter_report: (f32, f32),
+    /// How much of the jitter the decode adds back to the motion vectors.
+    pub expert_mv_dejitter: f32,
+    /// Multiplier on the decoded motion vectors, which frame generation is
+    /// given too.
+    pub expert_mv_scale: (f32, f32),
+    /// `NVSDK_NGX_DLSS_Feature_Flags` bits 0, 3, 6 and 2. Changing one
+    /// rebuilds the feature. See `dlss::configured_flags`.
+    pub expert_dlss_hdr: bool,
+    pub expert_dlss_depth_inverted: bool,
+    pub expert_dlss_auto_exposure: bool,
+    pub expert_dlss_mv_jittered: bool,
+    /// The distance both of the engine's alpha checkerboard distances are
+    /// set to, or 0 for what the mod does without it. See `tune::unroll`.
+    pub expert_alpha_unroll: f32,
+
     // ----- not settings ---------------------------------------------------
     //
     // Fixed at the value below and not read from the file. They are fields
@@ -249,6 +286,7 @@ impl Config {
         render_scale: crate::hijack::DEFAULT_RATIO,
         render_scale_asked: crate::hijack::DEFAULT_RATIO,
         mip_bias: 0,
+        sharpen: 0.0,
         undither: false,
         dlss_preset: 0,
         fg: false,
@@ -281,6 +319,18 @@ impl Config {
         fg_test_mask_value: 1.0,
         fg_test_mask_box: 1.0,
 
+        expert_jitter: true,
+        expert_jitter_pixels: crate::native::JITTER_PIXELS,
+        expert_jitter_phases: crate::native::JITTER_PHASES,
+        expert_jitter_report: crate::gpu::JITTER_REPORT,
+        expert_mv_dejitter: crate::gpu::MV_DEJITTER,
+        expert_mv_scale: (1.0, 1.0),
+        expert_dlss_hdr: true,
+        expert_dlss_depth_inverted: true,
+        expert_dlss_auto_exposure: true,
+        expert_dlss_mv_jittered: false,
+        expert_alpha_unroll: 0.0,
+
         mv_scale: (-1920.0, 1080.0),
         ngx_app_id: 0,
         fg_render_api: 1,
@@ -294,6 +344,62 @@ impl Config {
     };
 }
 
+impl Config {
+    /// These settings with every expert key as shipped.
+    fn without_expert(self) -> Config {
+        let shipped = Config::DEFAULT;
+        Config {
+            expert_jitter: shipped.expert_jitter,
+            expert_jitter_pixels: shipped.expert_jitter_pixels,
+            expert_jitter_phases: shipped.expert_jitter_phases,
+            expert_jitter_report: shipped.expert_jitter_report,
+            expert_mv_dejitter: shipped.expert_mv_dejitter,
+            expert_mv_scale: shipped.expert_mv_scale,
+            expert_dlss_hdr: shipped.expert_dlss_hdr,
+            expert_dlss_depth_inverted: shipped.expert_dlss_depth_inverted,
+            expert_dlss_auto_exposure: shipped.expert_dlss_auto_exposure,
+            expert_dlss_mv_jittered: shipped.expert_dlss_mv_jittered,
+            expert_alpha_unroll: shipped.expert_alpha_unroll,
+            ..self
+        }
+    }
+
+    /// Whether any expert key is set to something other than what ships.
+    pub fn expert_changed(&self) -> bool {
+        *self != self.without_expert()
+    }
+}
+
+/// What `sharpen` is held to, and where its slider on the settings page
+/// ends.
+pub const SHARPEN_RANGE: (f32, f32) = (0.0, 1.0);
+
+/// What the expert keys are held to, which is also where their sliders on
+/// the settings page end.
+pub const JITTER_PIXELS_RANGE: (f32, f32) = (0.0, 2.0);
+pub const JITTER_PHASES_RANGE: (u32, u32) = (1, 256);
+/// The multipliers and the dejitter: either sign, and up to twice over.
+pub const SIGNED_RANGE: (f32, f32) = (-2.0, 2.0);
+pub const ALPHA_UNROLL_RANGE: (f32, f32) = (0.0, 100_000.0);
+
+/// The expert keys, each with what it is as shipped, as the file writes it.
+/// This is what the settings page puts back.
+pub const EXPERT: &[(&str, &str)] = &[
+    ("expert_jitter", "1"),
+    ("expert_jitter_pixels", "1.0"),
+    ("expert_jitter_phases", "32"),
+    ("expert_jitter_report_x", "1.0"),
+    ("expert_jitter_report_y", "-1.0"),
+    ("expert_mv_dejitter", "0.0"),
+    ("expert_mv_scale_x", "1.0"),
+    ("expert_mv_scale_y", "1.0"),
+    ("expert_dlss_hdr", "1"),
+    ("expert_dlss_depth_inverted", "1"),
+    ("expert_dlss_auto_exposure", "1"),
+    ("expert_dlss_mv_jittered", "0"),
+    ("expert_alpha_unroll", "0.0"),
+];
+
 impl Default for Config {
     fn default() -> Self {
         Config::DEFAULT
@@ -306,6 +412,7 @@ impl Default for Config {
 const KEYS: &[&str] = &[
     "render_scale",
     "mip_bias",
+    "sharpen",
     "undither",
     "dlss_preset",
     "fg",
@@ -330,6 +437,19 @@ const KEYS: &[&str] = &[
     "fg_test_mask",
     "fg_test_mask_value",
     "fg_test_mask_box",
+    "expert_jitter",
+    "expert_jitter_pixels",
+    "expert_jitter_phases",
+    "expert_jitter_report_x",
+    "expert_jitter_report_y",
+    "expert_mv_dejitter",
+    "expert_mv_scale_x",
+    "expert_mv_scale_y",
+    "expert_dlss_hdr",
+    "expert_dlss_depth_inverted",
+    "expert_dlss_auto_exposure",
+    "expert_dlss_mv_jittered",
+    "expert_alpha_unroll",
 ];
 
 /// Keys that development builds read and this one does not, with what is
@@ -339,24 +459,56 @@ const KEYS: &[&str] = &[
 /// key defaulted to. Where the two differ the old default is named, because
 /// a file that relied on it is being read differently.
 const RETIRED: &[(&str, &str)] = &[
-    ("jitter", "fixed at 0: the external projection jitter is removed (old default 1)"),
-    ("jitter_pixels", "fixed at 1.0 (old default 0.5)"),
-    ("jitter_phases", "fixed at 32"),
-    ("jitter_report_x", "fixed at 1.0"),
-    ("jitter_report_y", "fixed at -1.0"),
-    ("jitter_inverses", "removed with the external projection jitter"),
-    ("jitter_view", "removed with the external projection jitter"),
-    ("jitter_always", "removed with the external projection jitter"),
-    ("jitter_no_jitter_proj", "removed with the external projection jitter"),
-    ("substitute", "removed with the external projection jitter"),
-    ("native_jitter", "fixed at 1: the engine's own jitter slot is always used (old default 0)"),
-    ("native_detour", "fixed at 1 (old default 0)"),
-    ("native_spin", "fixed at 0: the diagnostic thread is removed"),
-    ("native_fixed_x", "fixed at 0: the Halton sequence is always used"),
-    ("native_fixed_y", "fixed at 0: the Halton sequence is always used"),
     (
-        "sharpen",
-        "removed: it switched on the engine's CAS, which the engine only runs when its DLSS upscale stage is not usable, and under this mod that stage always is",
+        "jitter",
+        "fixed at 0: the external projection jitter is removed (old default 1)",
+    ),
+    (
+        "jitter_pixels",
+        "expert_jitter_pixels is the key now, 1.0 as shipped (old default 0.5)",
+    ),
+    (
+        "jitter_phases",
+        "expert_jitter_phases is the key now, 32 as shipped",
+    ),
+    (
+        "jitter_report_x",
+        "expert_jitter_report_x is the key now, 1.0 as shipped",
+    ),
+    (
+        "jitter_report_y",
+        "expert_jitter_report_y is the key now, -1.0 as shipped",
+    ),
+    (
+        "jitter_inverses",
+        "removed with the external projection jitter",
+    ),
+    ("jitter_view", "removed with the external projection jitter"),
+    (
+        "jitter_always",
+        "removed with the external projection jitter",
+    ),
+    (
+        "jitter_no_jitter_proj",
+        "removed with the external projection jitter",
+    ),
+    ("substitute", "removed with the external projection jitter"),
+    (
+        "native_jitter",
+        "fixed at 1: the engine's own jitter slot is always used (old default 0)",
+    ),
+    ("native_detour", "fixed at 1 (old default 0)"),
+    (
+        "native_spin",
+        "fixed at 0: the diagnostic thread is removed",
+    ),
+    (
+        "native_fixed_x",
+        "fixed at 0: the Halton sequence is always used",
+    ),
+    (
+        "native_fixed_y",
+        "fixed at 0: the Halton sequence is always used",
     ),
     (
         "resolve_at",
@@ -364,29 +516,56 @@ const RETIRED: &[(&str, &str)] = &[
          resolve_at_pass = 1 is the old route, for comparison",
     ),
     ("dlss", "fixed at 1 (old default 0)"),
-    ("dlss_quality", "fixed at -1, derived from render_scale (old default 5)"),
-    ("dlss_flags", "fixed at 0x49"),
+    (
+        "dlss_quality",
+        "fixed at -1, derived from render_scale (old default 5)",
+    ),
+    (
+        "dlss_flags",
+        "0x49 as shipped; the four expert_dlss_* keys are its bits now",
+    ),
     ("dlss_evaluate", "removed: nothing reached it"),
     ("dlss_spoof", "fixed at 1 (old default 0)"),
-    ("game_dlss", "fixed at 1: the game's own DLSS path is the only path (old default 0)"),
+    (
+        "game_dlss",
+        "fixed at 1: the game's own DLSS path is the only path (old default 0)",
+    ),
     ("game_dlss_at_taa", "fixed at 1 (old default 0)"),
     ("game_dlss_taa", "fixed at 1"),
     ("game_dlss_resolve", "fixed at 1"),
     ("game_dlss_colour", "fixed at 0"),
-    ("alpha_unroll", "fixed at 0.0"),
+    (
+        "alpha_unroll",
+        "expert_alpha_unroll is the key now, 0.0 as shipped",
+    ),
     ("mv_decode", "fixed at 1"),
     ("mv_mode", "fixed at 2"),
-    ("mv_scale_x", "fixed at -1920.0; upscaling derives its own from the render size"),
-    ("mv_scale_y", "fixed at 1080.0; upscaling derives its own from the render size"),
-    ("mv_dejitter", "fixed at 0.0 (old default 1.0)"),
+    (
+        "mv_scale_x",
+        "fixed at -1920.0; upscaling derives its own from the render size",
+    ),
+    (
+        "mv_scale_y",
+        "fixed at 1080.0; upscaling derives its own from the render size",
+    ),
+    (
+        "mv_dejitter",
+        "expert_mv_dejitter is the key now, 0.0 as shipped (old default 1.0)",
+    ),
     ("mv_offset", "fixed at 13"),
     ("colour_offset", "fixed at 9"),
     ("depth_index", "fixed at 0"),
     ("colour_sanitise", "fixed at 0"),
     ("ngx_version", "fixed at 21"),
     ("ngx_app_id", "fixed at 0, the game's own"),
-    ("swap_hooks", "fixed at 1; only consulted with fg = 0 (old default 0)"),
-    ("reflex_low_latency", "nothing read it; frame generation forces Reflex on"),
+    (
+        "swap_hooks",
+        "fixed at 1; only consulted with fg = 0 (old default 0)",
+    ),
+    (
+        "reflex_low_latency",
+        "nothing read it; frame generation forces Reflex on",
+    ),
     ("fg_render_api", "fixed at 1, eD3D12"),
     ("fg_identity", "fixed at 1, the engine/project route"),
     ("fg_engine", "fixed at 0, eCustom"),
@@ -395,10 +574,22 @@ const RETIRED: &[(&str, &str)] = &[
     ("fg_ota", "fixed at 1, Streamline's own default"),
     ("hudless_slot", "fixed at 0; hudless_occurrence is the key"),
     ("hudless_format", "fixed at 26, R11G11B10_FLOAT"),
-    ("drs_probe", "removed: the driver-profile probe has answered and is gone"),
-    ("fg_mvec_space", "fixed at 0: the motion-vector scale is derived from the tagged buffer"),
-    ("fg_mvec_jittered", "fixed at 0: the tagged vectors carry no jitter"),
-    ("fg_mvec_dilated", "fixed at 0: the tagged vectors are not dilated"),
+    (
+        "drs_probe",
+        "removed: the driver-profile probe has answered and is gone",
+    ),
+    (
+        "fg_mvec_space",
+        "fixed at 0: the motion-vector scale is derived from the tagged buffer",
+    ),
+    (
+        "fg_mvec_jittered",
+        "fixed at 0: the tagged vectors carry no jitter",
+    ),
+    (
+        "fg_mvec_dilated",
+        "fixed at 0: the tagged vectors are not dilated",
+    ),
 ];
 
 /// A line of the file that set nothing.
@@ -530,6 +721,12 @@ pub fn with_key(text: &str, key: &str, value: &str) -> String {
 /// half-written one; it keeps its previous values if it catches the moment
 /// in between.
 pub fn write_key(key: &str, value: &str) -> std::io::Result<()> {
+    write_keys(&[(key, value)])
+}
+
+/// Set several keys in the settings file in one write, so the watcher sees
+/// them together.
+pub fn write_keys(pairs: &[(&str, &str)]) -> std::io::Result<()> {
     let Some(path) = PATH.read().clone() else {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -537,7 +734,9 @@ pub fn write_key(key: &str, value: &str) -> std::io::Result<()> {
         ));
     };
     let text = std::fs::read_to_string(&path)?;
-    let updated = with_key(&text, key, value);
+    let updated = pairs.iter().fold(text.clone(), |text, (key, value)| {
+        with_key(&text, key, value)
+    });
     if updated == text {
         return Ok(());
     }
@@ -596,11 +795,12 @@ fn reload() {
     // works from that are not in the file are constants and are not repeated
     // here; each module logs what it observed.
     crate::log!(
-        "[cfg] render_scale={} mip_bias={} undither={} preset={} | fg={} x{} \
+        "[cfg] render_scale={} mip_bias={} sharpen={} undither={} preset={} | fg={} x{} \
          hudless={} occurrence={} survey={} boost={} latency={} mvec=({},{},{}) | \
          verbose={} perf={} mv_probe={} dred={} debug_layer={} sl_log={}",
         parsed.render_scale,
         parsed.mip_bias,
+        parsed.sharpen,
         parsed.undither,
         parsed.dlss_preset,
         parsed.fg,
@@ -620,12 +820,42 @@ fn reload() {
         parsed.debug_layer,
         parsed.fg_log_level
     );
+    // Only when one of them is not what ships: a picture judged with an
+    // expert key moved should say so in the log it is reported with.
+    if parsed.expert_changed() {
+        crate::log!(
+            "[cfg] expert keys are not all as shipped: jitter={} pixels={} phases={} \
+             report=({},{}) | mv dejitter={} scale=({},{}) | dlss hdr={} depth_inverted={} \
+             auto_exposure={} mv_jittered={} | alpha_unroll={}",
+            parsed.expert_jitter,
+            parsed.expert_jitter_pixels,
+            parsed.expert_jitter_phases,
+            parsed.expert_jitter_report.0,
+            parsed.expert_jitter_report.1,
+            parsed.expert_mv_dejitter,
+            parsed.expert_mv_scale.0,
+            parsed.expert_mv_scale.1,
+            parsed.expert_dlss_hdr,
+            parsed.expert_dlss_depth_inverted,
+            parsed.expert_dlss_auto_exposure,
+            parsed.expert_dlss_mv_jittered,
+            parsed.expert_alpha_unroll
+        );
+    }
 }
 
 fn parse_reporting(text: &str) -> (Config, Vec<Ignored>) {
     let mut ignored = Vec::new();
     let mut config = Config::default();
     let flag = |value: &str| matches!(value, "1" | "true" | "on" | "yes");
+    // A number held to a range; anything that is not a number sets nothing.
+    let ranged = |value: &str, (low, high): (f32, f32)| {
+        value
+            .parse::<f32>()
+            .ok()
+            .filter(|parsed| parsed.is_finite())
+            .map(|parsed| parsed.clamp(low, high))
+    };
 
     for line in text.lines() {
         let line = line.trim();
@@ -646,6 +876,11 @@ fn parse_reporting(text: &str) -> (Config, Vec<Ignored>) {
             "mip_bias" => {
                 if let Ok(parsed) = value.parse::<u32>() {
                     config.mip_bias = parsed.min(14);
+                }
+            }
+            "sharpen" => {
+                if let Some(parsed) = ranged(value, SHARPEN_RANGE) {
+                    config.sharpen = parsed;
                 }
             }
             "undither" => config.undither = flag(value),
@@ -708,6 +943,52 @@ fn parse_reporting(text: &str) -> (Config, Vec<Ignored>) {
                     }
                 }
             }
+            "expert_jitter" => config.expert_jitter = flag(value),
+            "expert_jitter_pixels" => {
+                if let Some(parsed) = ranged(value, JITTER_PIXELS_RANGE) {
+                    config.expert_jitter_pixels = parsed;
+                }
+            }
+            "expert_jitter_phases" => {
+                if let Ok(parsed) = value.parse::<u32>() {
+                    config.expert_jitter_phases =
+                        parsed.clamp(JITTER_PHASES_RANGE.0, JITTER_PHASES_RANGE.1);
+                }
+            }
+            "expert_jitter_report_x" => {
+                if let Some(parsed) = ranged(value, SIGNED_RANGE) {
+                    config.expert_jitter_report.0 = parsed;
+                }
+            }
+            "expert_jitter_report_y" => {
+                if let Some(parsed) = ranged(value, SIGNED_RANGE) {
+                    config.expert_jitter_report.1 = parsed;
+                }
+            }
+            "expert_mv_dejitter" => {
+                if let Some(parsed) = ranged(value, SIGNED_RANGE) {
+                    config.expert_mv_dejitter = parsed;
+                }
+            }
+            "expert_mv_scale_x" => {
+                if let Some(parsed) = ranged(value, SIGNED_RANGE) {
+                    config.expert_mv_scale.0 = parsed;
+                }
+            }
+            "expert_mv_scale_y" => {
+                if let Some(parsed) = ranged(value, SIGNED_RANGE) {
+                    config.expert_mv_scale.1 = parsed;
+                }
+            }
+            "expert_dlss_hdr" => config.expert_dlss_hdr = flag(value),
+            "expert_dlss_depth_inverted" => config.expert_dlss_depth_inverted = flag(value),
+            "expert_dlss_auto_exposure" => config.expert_dlss_auto_exposure = flag(value),
+            "expert_dlss_mv_jittered" => config.expert_dlss_mv_jittered = flag(value),
+            "expert_alpha_unroll" => {
+                if let Some(parsed) = ranged(value, ALPHA_UNROLL_RANGE) {
+                    config.expert_alpha_unroll = parsed;
+                }
+            }
             _ => ignored.push(Ignored {
                 key: key.to_string(),
                 value: value.to_string(),
@@ -745,6 +1026,13 @@ render_scale = 0.667
 #               the render_scale set then: restart the game after changing
 #               either for the bias to follow.
 mip_bias = 0
+
+# sharpen       how strongly the picture is sharpened after DLSS, which does
+#               not sharpen by itself: 0.0 to 1.0, and 0 is off. Done before
+#               the interface is drawn, so the interface is not sharpened.
+#               Costs one full-size texture of video memory and a short pass
+#               per frame.
+sharpen = 0.0
 
 # undither      1 stops screen-space reflections and contact shadows using
 #               noise patterns that only the game's own anti-aliasing can
@@ -853,6 +1141,59 @@ fg_test_mask = 0
 fg_test_mask_value = 1.0
 fg_test_mask_box = 1.0
 fg_uir = 0
+
+# ---------------------------------------------------------------------------
+# Expert. Values the mod otherwise holds at the one that was measured for
+# this game. As written here they change nothing. They are for judging the
+# picture against a different value while the game runs: every one applies
+# within a second, and a wrong one gives a wrong picture, not a crash. The
+# settings page in ReShade's overlay has them under Expert settings, with a
+# button that puts them back.
+# ---------------------------------------------------------------------------
+
+# expert_jitter           0 stops the mod moving the camera by a fraction of
+#                         a pixel each frame, which is what DLSS builds
+#                         detail from. For comparison.
+# expert_jitter_pixels    how many render pixels the samples are spread
+#                         across: 0.0 to 2.0. Under 1 is steadier and softer.
+# expert_jitter_phases    how many frames before the pattern repeats: 1 to
+#                         256. NVIDIA's guide gives 8 divided by the square
+#                         of render_scale: 8 at 1.0, 18 at 0.667, 32 at 0.5.
+# expert_jitter_report_x  multipliers on the offset DLSS is told the camera
+# expert_jitter_report_y  had: -2.0 to 2.0. The wrong sign on an axis blurs
+#                         and shimmers along that axis.
+expert_jitter = 1
+expert_jitter_pixels = 1.0
+expert_jitter_phases = 32
+expert_jitter_report_x = 1.0
+expert_jitter_report_y = -1.0
+
+# expert_mv_dejitter  how much of the jitter is added back to the motion
+#                     vectors: -2.0 to 2.0. The game's vectors carry none,
+#                     so 0.
+# expert_mv_scale_x   multipliers on the motion vectors DLSS and frame
+# expert_mv_scale_y   generation are given: -2.0 to 2.0. Too long or too
+#                     short smears or ghosts whatever moves.
+expert_mv_dejitter = 0.0
+expert_mv_scale_x = 1.0
+expert_mv_scale_y = 1.0
+
+# expert_dlss_hdr             what DLSS is told about its inputs. The colour
+# expert_dlss_depth_inverted  is HDR, the depth buffer has near at 1, DLSS
+# expert_dlss_auto_exposure   works out the exposure itself, and the motion
+# expert_dlss_mv_jittered     vectors carry no jitter. Changing one rebuilds
+#                             DLSS, which shows as a single rough frame.
+expert_dlss_hdr = 1
+expert_dlss_depth_inverted = 1
+expert_dlss_auto_exposure = 1
+expert_dlss_mv_jittered = 0
+
+# expert_alpha_unroll  the game draws transparency meant for its own
+#                      anti-aliasing as a checkerboard between two
+#                      distances, and the mod holds both at the farther one.
+#                      A number above 0 holds both at that distance instead,
+#                      up to 100000; 0 leaves them as the mod has them.
+expert_alpha_unroll = 0.0
 ";
 
 /// Write the file on first run, so the available settings are discoverable.
@@ -905,6 +1246,7 @@ mod tests {
         assert_eq!(parsed.render_scale, crate::hijack::DEFAULT_RATIO);
         assert_eq!(parsed.fg_log_level, 1);
         assert_eq!(parsed.dlss_preset, 0);
+        assert_eq!(parsed.sharpen, 0.0);
         assert!(!parsed.fg_mvec_jittered);
         assert!(!parsed.fg_mvec_dilated);
         // The five frame generation experiments, which as shipped change
@@ -914,6 +1256,20 @@ mod tests {
         assert_eq!(parsed.fg_test_mask, 0);
         assert_eq!(parsed.fg_test_mask_value, 1.0);
         assert_eq!(parsed.fg_test_mask_box, 1.0);
+        // The expert keys, which as shipped are the values the mod was
+        // verified with.
+        assert!(!parsed.expert_changed());
+        assert!(parsed.expert_jitter);
+        assert_eq!(parsed.expert_jitter_pixels, 1.0);
+        assert_eq!(parsed.expert_jitter_phases, 32);
+        assert!(parsed.expert_jitter_report == (1.0, -1.0));
+        assert_eq!(parsed.expert_mv_dejitter, 0.0);
+        assert!(parsed.expert_mv_scale == (1.0, 1.0));
+        assert!(parsed.expert_dlss_hdr);
+        assert!(parsed.expert_dlss_depth_inverted);
+        assert!(parsed.expert_dlss_auto_exposure);
+        assert!(!parsed.expert_dlss_mv_jittered);
+        assert_eq!(parsed.expert_alpha_unroll, 0.0);
         // The values other modules read from here that are not settings.
         assert_eq!(parsed.hudless_format, 26);
         assert_eq!(parsed.hudless_slot, 0);
@@ -965,9 +1321,78 @@ mod tests {
         }
     }
 
+    /// The list the settings page puts back is every expert key, at the
+    /// value the shipped file gives it, and putting it back over any file
+    /// leaves no expert key changed.
+    #[test]
+    fn the_expert_list_is_the_shipped_expert_keys() {
+        let named: Vec<&str> = KEYS
+            .iter()
+            .copied()
+            .filter(|key| key.starts_with("expert_"))
+            .collect();
+        let listed: Vec<&str> = EXPERT.iter().map(|(key, _)| *key).collect();
+        assert_eq!(named, listed);
+        for (key, value) in EXPERT {
+            assert!(
+                SHIPPED
+                    .lines()
+                    .any(|line| line == format!("{key} = {value}")),
+                "the shipped file does not have `{key} = {value}`"
+            );
+        }
+
+        let moved = "expert_jitter = 0\nexpert_jitter_pixels = 0.5\nexpert_jitter_phases = 8\n\
+                     expert_jitter_report_x = -1\nexpert_jitter_report_y = 1\n\
+                     expert_mv_dejitter = 1\nexpert_mv_scale_x = -1\nexpert_mv_scale_y = 0.5\n\
+                     expert_dlss_hdr = 0\nexpert_dlss_depth_inverted = 0\n\
+                     expert_dlss_auto_exposure = 0\nexpert_dlss_mv_jittered = 1\n\
+                     expert_alpha_unroll = 500\nrender_scale = 0.5\n";
+        let (parsed, ignored) = parse_reporting(moved);
+        assert!(ignored.is_empty());
+        assert!(parsed.expert_changed());
+        assert!(!parsed.expert_jitter);
+        assert_eq!(parsed.expert_jitter_pixels, 0.5);
+        assert_eq!(parsed.expert_jitter_phases, 8);
+        assert!(parsed.expert_jitter_report == (-1.0, 1.0));
+        assert_eq!(parsed.expert_mv_dejitter, 1.0);
+        assert!(parsed.expert_mv_scale == (-1.0, 0.5));
+        assert!(!parsed.expert_dlss_hdr);
+        assert!(!parsed.expert_dlss_depth_inverted);
+        assert!(!parsed.expert_dlss_auto_exposure);
+        assert!(parsed.expert_dlss_mv_jittered);
+        assert_eq!(parsed.expert_alpha_unroll, 500.0);
+
+        let restored = EXPERT.iter().fold(moved.to_string(), |text, (key, value)| {
+            with_key(&text, key, value)
+        });
+        let (parsed, _) = parse_reporting(&restored);
+        assert!(!parsed.expert_changed());
+        // And nothing else was touched.
+        assert_eq!(parsed.render_scale, 0.5);
+    }
+
+    /// Out of range is clamped and nonsense sets nothing, so no value of an
+    /// expert key reaches the code that divides by it or loops over it.
+    #[test]
+    fn expert_keys_are_held_to_their_ranges() {
+        let (parsed, _) = parse_reporting(
+            "expert_jitter_phases = 0\nexpert_jitter_pixels = 9\nexpert_mv_scale_x = -7\n\
+             expert_alpha_unroll = -3\nexpert_mv_dejitter = nan\nexpert_jitter_report_x = inf\n",
+        );
+        assert_eq!(parsed.expert_jitter_phases, 1);
+        assert_eq!(parsed.expert_jitter_pixels, 2.0);
+        assert_eq!(parsed.expert_mv_scale.0, -2.0);
+        assert_eq!(parsed.expert_alpha_unroll, 0.0);
+        assert_eq!(parsed.expert_mv_dejitter, 0.0);
+        assert_eq!(parsed.expert_jitter_report.0, 1.0);
+        let (parsed, _) = parse_reporting("expert_jitter_phases = 100000\n");
+        assert_eq!(parsed.expert_jitter_phases, 256);
+    }
+
     /// The keys three branches added or retired side by side, in one file:
-    /// the resolve path's (`resolve_at_pass`, `path_dump`, and `sharpen` and
-    /// `resolve_at` retired), and the hardening's (`diag_unknown_build`,
+    /// the resolve path's (`resolve_at_pass`, `path_dump`, and `resolve_at`
+    /// retired), and the hardening's (`diag_unknown_build`,
     /// `fg_log_level`, `dlss_preset`).
     #[test]
     fn the_keys_of_every_branch_are_taken_together() {
@@ -983,15 +1408,19 @@ mod tests {
         // 0 is not a ratio and is read as the default.
         assert_eq!(parsed.render_scale, crate::hijack::DEFAULT_RATIO);
         assert_eq!(parsed.render_scale_asked, 0.0);
+        // `sharpen` was retired with the engine's CAS and is a setting
+        // again, for the pass in `sharpen.rs`: the same thing asked for.
+        assert_eq!(parsed.sharpen, 0.3);
         let names: Vec<&str> = ignored.iter().map(|line| line.key.as_str()).collect();
-        assert_eq!(names, ["sharpen", "resolve_at"]);
-        for key in ["sharpen", "resolve_at"] {
-            assert!(
-                RETIRED.iter().any(|(name, _)| *name == key),
-                "{key} is not listed as retired"
-            );
-            assert!(!KEYS.contains(&key), "{key} is retired and still a key");
-        }
+        assert_eq!(names, ["resolve_at"]);
+        assert!(
+            RETIRED.iter().any(|(name, _)| *name == "resolve_at"),
+            "resolve_at is not listed as retired"
+        );
+        assert!(
+            !KEYS.contains(&"resolve_at"),
+            "resolve_at is retired and still a key"
+        );
         for key in [
             "resolve_at_pass",
             "path_dump",
@@ -1005,6 +1434,10 @@ mod tests {
         assert_eq!(parsed.render_scale, crate::hijack::SMALLEST);
         let (parsed, _) = parse_reporting("render_scale = 1.7\n");
         assert_eq!(parsed.render_scale, crate::hijack::LARGEST);
+        let (parsed, _) = parse_reporting("sharpen = 3\n");
+        assert_eq!(parsed.sharpen, 1.0);
+        let (parsed, _) = parse_reporting("sharpen = -1\n");
+        assert_eq!(parsed.sharpen, 0.0);
     }
 
     /// `get` hands every thread the published settings, and a thread that has
@@ -1136,9 +1569,9 @@ hudless_occurrence = 2
                 "depth_offset"
             ]
         );
-        // 57 lines: 13 that are still settings, 4 unknown, 40 retired.
+        // 57 lines: 14 that are settings, 4 unknown, 39 retired.
         assert_eq!(deployed.lines().count(), 57);
-        assert_eq!(ignored.len(), 44);
+        assert_eq!(ignored.len(), 43);
     }
 
     /// One key rewritten, nothing else touched: comments, order, the other

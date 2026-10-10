@@ -39,6 +39,11 @@ the Zope Public License 2.1; see mingw-w64's `COPYING.MinGW-w64-runtime.txt`).
 `src/fasthash.rs` uses the finalising step of MurmurHash3, which its author,
 Austin Appleby, placed in the public domain.
 
+The sharpening shader in `src/sharpen.rs` is this project's own writing of
+the RCAS filter from AMD's FidelityFX Super Resolution 1.0 (`ffx_fsr1.h`,
+Copyright (c) Advanced Micro Devices, Inc., MIT licence, text below). No
+file of AMD's is included.
+
 ### The MIT licence
 
 ```text
