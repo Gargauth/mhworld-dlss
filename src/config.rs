@@ -89,6 +89,10 @@ pub struct Config {
     /// selected, and at 1.0 nothing is built or selected. Read at start-up.
     /// See `hijack::mip_bias_bank` and `tune::prepare_exact_bias`.
     pub mip_bias: u32,
+    /// How strongly the resolved picture is sharpened, 0 to 1, by a pass of
+    /// this library's own between DLSS and the engine's target; 0 is no
+    /// pass at all. Live. See `sharpen.rs`.
+    pub sharpen: f32,
     /// Stop the screen-space effects resolving their detail across frames
     /// with patterns only the engine's own temporal pass understands. Cannot
     /// be undone within a session.
@@ -282,6 +286,7 @@ impl Config {
         render_scale: crate::hijack::DEFAULT_RATIO,
         render_scale_asked: crate::hijack::DEFAULT_RATIO,
         mip_bias: 0,
+        sharpen: 0.0,
         undither: false,
         dlss_preset: 0,
         fg: false,
@@ -365,6 +370,10 @@ impl Config {
     }
 }
 
+/// What `sharpen` is held to, and where its slider on the settings page
+/// ends.
+pub const SHARPEN_RANGE: (f32, f32) = (0.0, 1.0);
+
 /// What the expert keys are held to, which is also where their sliders on
 /// the settings page end.
 pub const JITTER_PIXELS_RANGE: (f32, f32) = (0.0, 2.0);
@@ -403,6 +412,7 @@ impl Default for Config {
 const KEYS: &[&str] = &[
     "render_scale",
     "mip_bias",
+    "sharpen",
     "undither",
     "dlss_preset",
     "fg",
@@ -449,27 +459,56 @@ const KEYS: &[&str] = &[
 /// key defaulted to. Where the two differ the old default is named, because
 /// a file that relied on it is being read differently.
 const RETIRED: &[(&str, &str)] = &[
-    ("jitter", "fixed at 0: the external projection jitter is removed (old default 1)"),
+    (
+        "jitter",
+        "fixed at 0: the external projection jitter is removed (old default 1)",
+    ),
     (
         "jitter_pixels",
         "expert_jitter_pixels is the key now, 1.0 as shipped (old default 0.5)",
     ),
-    ("jitter_phases", "expert_jitter_phases is the key now, 32 as shipped"),
-    ("jitter_report_x", "expert_jitter_report_x is the key now, 1.0 as shipped"),
-    ("jitter_report_y", "expert_jitter_report_y is the key now, -1.0 as shipped"),
-    ("jitter_inverses", "removed with the external projection jitter"),
-    ("jitter_view", "removed with the external projection jitter"),
-    ("jitter_always", "removed with the external projection jitter"),
-    ("jitter_no_jitter_proj", "removed with the external projection jitter"),
-    ("substitute", "removed with the external projection jitter"),
-    ("native_jitter", "fixed at 1: the engine's own jitter slot is always used (old default 0)"),
-    ("native_detour", "fixed at 1 (old default 0)"),
-    ("native_spin", "fixed at 0: the diagnostic thread is removed"),
-    ("native_fixed_x", "fixed at 0: the Halton sequence is always used"),
-    ("native_fixed_y", "fixed at 0: the Halton sequence is always used"),
     (
-        "sharpen",
-        "removed: it switched on the engine's CAS, which the engine only runs when its DLSS upscale stage is not usable, and under this mod that stage always is",
+        "jitter_phases",
+        "expert_jitter_phases is the key now, 32 as shipped",
+    ),
+    (
+        "jitter_report_x",
+        "expert_jitter_report_x is the key now, 1.0 as shipped",
+    ),
+    (
+        "jitter_report_y",
+        "expert_jitter_report_y is the key now, -1.0 as shipped",
+    ),
+    (
+        "jitter_inverses",
+        "removed with the external projection jitter",
+    ),
+    ("jitter_view", "removed with the external projection jitter"),
+    (
+        "jitter_always",
+        "removed with the external projection jitter",
+    ),
+    (
+        "jitter_no_jitter_proj",
+        "removed with the external projection jitter",
+    ),
+    ("substitute", "removed with the external projection jitter"),
+    (
+        "native_jitter",
+        "fixed at 1: the engine's own jitter slot is always used (old default 0)",
+    ),
+    ("native_detour", "fixed at 1 (old default 0)"),
+    (
+        "native_spin",
+        "fixed at 0: the diagnostic thread is removed",
+    ),
+    (
+        "native_fixed_x",
+        "fixed at 0: the Halton sequence is always used",
+    ),
+    (
+        "native_fixed_y",
+        "fixed at 0: the Halton sequence is always used",
     ),
     (
         "resolve_at",
@@ -477,23 +516,38 @@ const RETIRED: &[(&str, &str)] = &[
          resolve_at_pass = 1 is the old route, for comparison",
     ),
     ("dlss", "fixed at 1 (old default 0)"),
-    ("dlss_quality", "fixed at -1, derived from render_scale (old default 5)"),
+    (
+        "dlss_quality",
+        "fixed at -1, derived from render_scale (old default 5)",
+    ),
     (
         "dlss_flags",
         "0x49 as shipped; the four expert_dlss_* keys are its bits now",
     ),
     ("dlss_evaluate", "removed: nothing reached it"),
     ("dlss_spoof", "fixed at 1 (old default 0)"),
-    ("game_dlss", "fixed at 1: the game's own DLSS path is the only path (old default 0)"),
+    (
+        "game_dlss",
+        "fixed at 1: the game's own DLSS path is the only path (old default 0)",
+    ),
     ("game_dlss_at_taa", "fixed at 1 (old default 0)"),
     ("game_dlss_taa", "fixed at 1"),
     ("game_dlss_resolve", "fixed at 1"),
     ("game_dlss_colour", "fixed at 0"),
-    ("alpha_unroll", "expert_alpha_unroll is the key now, 0.0 as shipped"),
+    (
+        "alpha_unroll",
+        "expert_alpha_unroll is the key now, 0.0 as shipped",
+    ),
     ("mv_decode", "fixed at 1"),
     ("mv_mode", "fixed at 2"),
-    ("mv_scale_x", "fixed at -1920.0; upscaling derives its own from the render size"),
-    ("mv_scale_y", "fixed at 1080.0; upscaling derives its own from the render size"),
+    (
+        "mv_scale_x",
+        "fixed at -1920.0; upscaling derives its own from the render size",
+    ),
+    (
+        "mv_scale_y",
+        "fixed at 1080.0; upscaling derives its own from the render size",
+    ),
     (
         "mv_dejitter",
         "expert_mv_dejitter is the key now, 0.0 as shipped (old default 1.0)",
@@ -504,8 +558,14 @@ const RETIRED: &[(&str, &str)] = &[
     ("colour_sanitise", "fixed at 0"),
     ("ngx_version", "fixed at 21"),
     ("ngx_app_id", "fixed at 0, the game's own"),
-    ("swap_hooks", "fixed at 1; only consulted with fg = 0 (old default 0)"),
-    ("reflex_low_latency", "nothing read it; frame generation forces Reflex on"),
+    (
+        "swap_hooks",
+        "fixed at 1; only consulted with fg = 0 (old default 0)",
+    ),
+    (
+        "reflex_low_latency",
+        "nothing read it; frame generation forces Reflex on",
+    ),
     ("fg_render_api", "fixed at 1, eD3D12"),
     ("fg_identity", "fixed at 1, the engine/project route"),
     ("fg_engine", "fixed at 0, eCustom"),
@@ -514,10 +574,22 @@ const RETIRED: &[(&str, &str)] = &[
     ("fg_ota", "fixed at 1, Streamline's own default"),
     ("hudless_slot", "fixed at 0; hudless_occurrence is the key"),
     ("hudless_format", "fixed at 26, R11G11B10_FLOAT"),
-    ("drs_probe", "removed: the driver-profile probe has answered and is gone"),
-    ("fg_mvec_space", "fixed at 0: the motion-vector scale is derived from the tagged buffer"),
-    ("fg_mvec_jittered", "fixed at 0: the tagged vectors carry no jitter"),
-    ("fg_mvec_dilated", "fixed at 0: the tagged vectors are not dilated"),
+    (
+        "drs_probe",
+        "removed: the driver-profile probe has answered and is gone",
+    ),
+    (
+        "fg_mvec_space",
+        "fixed at 0: the motion-vector scale is derived from the tagged buffer",
+    ),
+    (
+        "fg_mvec_jittered",
+        "fixed at 0: the tagged vectors carry no jitter",
+    ),
+    (
+        "fg_mvec_dilated",
+        "fixed at 0: the tagged vectors are not dilated",
+    ),
 ];
 
 /// A line of the file that set nothing.
@@ -723,11 +795,12 @@ fn reload() {
     // works from that are not in the file are constants and are not repeated
     // here; each module logs what it observed.
     crate::log!(
-        "[cfg] render_scale={} mip_bias={} undither={} preset={} | fg={} x{} \
+        "[cfg] render_scale={} mip_bias={} sharpen={} undither={} preset={} | fg={} x{} \
          hudless={} occurrence={} survey={} boost={} latency={} mvec=({},{},{}) | \
          verbose={} perf={} mv_probe={} dred={} debug_layer={} sl_log={}",
         parsed.render_scale,
         parsed.mip_bias,
+        parsed.sharpen,
         parsed.undither,
         parsed.dlss_preset,
         parsed.fg,
@@ -803,6 +876,11 @@ fn parse_reporting(text: &str) -> (Config, Vec<Ignored>) {
             "mip_bias" => {
                 if let Ok(parsed) = value.parse::<u32>() {
                     config.mip_bias = parsed.min(14);
+                }
+            }
+            "sharpen" => {
+                if let Some(parsed) = ranged(value, SHARPEN_RANGE) {
+                    config.sharpen = parsed;
                 }
             }
             "undither" => config.undither = flag(value),
@@ -948,6 +1026,13 @@ render_scale = 0.667
 #               the render_scale set then: restart the game after changing
 #               either for the bias to follow.
 mip_bias = 0
+
+# sharpen       how strongly the picture is sharpened after DLSS, which does
+#               not sharpen by itself: 0.0 to 1.0, and 0 is off. Done before
+#               the interface is drawn, so the interface is not sharpened.
+#               Costs one full-size texture of video memory and a short pass
+#               per frame.
+sharpen = 0.0
 
 # undither      1 stops screen-space reflections and contact shadows using
 #               noise patterns that only the game's own anti-aliasing can
@@ -1161,6 +1246,7 @@ mod tests {
         assert_eq!(parsed.render_scale, crate::hijack::DEFAULT_RATIO);
         assert_eq!(parsed.fg_log_level, 1);
         assert_eq!(parsed.dlss_preset, 0);
+        assert_eq!(parsed.sharpen, 0.0);
         assert!(!parsed.fg_mvec_jittered);
         assert!(!parsed.fg_mvec_dilated);
         // The five frame generation experiments, which as shipped change
@@ -1305,8 +1391,8 @@ mod tests {
     }
 
     /// The keys three branches added or retired side by side, in one file:
-    /// the resolve path's (`resolve_at_pass`, `path_dump`, and `sharpen` and
-    /// `resolve_at` retired), and the hardening's (`diag_unknown_build`,
+    /// the resolve path's (`resolve_at_pass`, `path_dump`, and `resolve_at`
+    /// retired), and the hardening's (`diag_unknown_build`,
     /// `fg_log_level`, `dlss_preset`).
     #[test]
     fn the_keys_of_every_branch_are_taken_together() {
@@ -1322,15 +1408,19 @@ mod tests {
         // 0 is not a ratio and is read as the default.
         assert_eq!(parsed.render_scale, crate::hijack::DEFAULT_RATIO);
         assert_eq!(parsed.render_scale_asked, 0.0);
+        // `sharpen` was retired with the engine's CAS and is a setting
+        // again, for the pass in `sharpen.rs`: the same thing asked for.
+        assert_eq!(parsed.sharpen, 0.3);
         let names: Vec<&str> = ignored.iter().map(|line| line.key.as_str()).collect();
-        assert_eq!(names, ["sharpen", "resolve_at"]);
-        for key in ["sharpen", "resolve_at"] {
-            assert!(
-                RETIRED.iter().any(|(name, _)| *name == key),
-                "{key} is not listed as retired"
-            );
-            assert!(!KEYS.contains(&key), "{key} is retired and still a key");
-        }
+        assert_eq!(names, ["resolve_at"]);
+        assert!(
+            RETIRED.iter().any(|(name, _)| *name == "resolve_at"),
+            "resolve_at is not listed as retired"
+        );
+        assert!(
+            !KEYS.contains(&"resolve_at"),
+            "resolve_at is retired and still a key"
+        );
         for key in [
             "resolve_at_pass",
             "path_dump",
@@ -1344,6 +1434,10 @@ mod tests {
         assert_eq!(parsed.render_scale, crate::hijack::SMALLEST);
         let (parsed, _) = parse_reporting("render_scale = 1.7\n");
         assert_eq!(parsed.render_scale, crate::hijack::LARGEST);
+        let (parsed, _) = parse_reporting("sharpen = 3\n");
+        assert_eq!(parsed.sharpen, 1.0);
+        let (parsed, _) = parse_reporting("sharpen = -1\n");
+        assert_eq!(parsed.sharpen, 0.0);
     }
 
     /// `get` hands every thread the published settings, and a thread that has
@@ -1475,9 +1569,9 @@ hudless_occurrence = 2
                 "depth_offset"
             ]
         );
-        // 57 lines: 13 that are still settings, 4 unknown, 40 retired.
+        // 57 lines: 14 that are settings, 4 unknown, 39 retired.
         assert_eq!(deployed.lines().count(), 57);
-        assert_eq!(ignored.len(), 44);
+        assert_eq!(ignored.len(), 43);
     }
 
     /// One key rewritten, nothing else touched: comments, order, the other

@@ -216,6 +216,7 @@ pub unsafe fn register_once() {
 #[derive(Clone, Copy, Default)]
 struct Pending {
     render_scale: Option<f32>,
+    sharpen: Option<f32>,
     multiplier: Option<i32>,
     /// The position of the DLSS preset slider, an index into `PRESETS`.
     preset: Option<i32>,
@@ -228,6 +229,7 @@ struct Pending {
 
 static PENDING: Mutex<Pending> = Mutex::new(Pending {
     render_scale: None,
+    sharpen: None,
     multiplier: None,
     preset: None,
     knobs: [None; KNOBS.len()],
@@ -580,6 +582,31 @@ unsafe extern "C" fn draw(_runtime: *mut c_void) {
             ),
         }
     }
+
+    // Sharpening: this library's own pass between DLSS and the engine's
+    // target, so it is live and the interface is not part of it.
+    let range = crate::config::SHARPEN_RANGE;
+    let mut sharpen = pending.sharpen.unwrap_or(settings.sharpen);
+    if slider_float(
+        c"Sharpening".as_ptr(),
+        &mut sharpen,
+        range.0,
+        range.1,
+        c"%.2f".as_ptr(),
+        0,
+    ) {
+        pending.sharpen = Some(sharpen);
+        pending.frames = PENDING_FRAMES;
+    }
+    if released() {
+        let sharpen = if sharpen.is_finite() {
+            sharpen.clamp(range.0, range.1)
+        } else {
+            range.0
+        };
+        write("sharpen", format!("{sharpen:.2}"));
+    }
+    say("0 is off. DLSS does not sharpen by itself; this is done after it and before the interface is drawn.");
 
     separator();
 

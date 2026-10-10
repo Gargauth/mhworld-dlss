@@ -131,6 +131,7 @@ pub mod redact;
 pub mod reshade;
 pub mod rootsig;
 pub mod selftest;
+pub mod sharpen;
 pub mod states;
 pub mod streamline;
 pub mod swap;

@@ -63,7 +63,7 @@ where they are.
 
 **The settings page.** With an add-on build, the mod adds a page to
 ReShade's overlay: open the overlay, go to the Add-ons tab and expand
-`mhw-dlss`. It has the render scale, the frame generation switches, the frame
+`mhw-dlss`. It has the render scale, sharpening, the frame generation switches, the frame
 multiplier and Reflex boost, and it shows the current render and output
 sizes. Under **Expert settings**, closed until you open it, are the DLSS
 model preset and the `expert_` keys -- jitter, motion vectors, what DLSS is

@@ -1377,7 +1377,10 @@ pub(crate) unsafe fn resolve_at_slot(
     }
     keep_alive(&[colour, output, depth, motion]);
     let perf = crate::perf::start(crate::perf::Family::Evaluate);
-    let evaluated = crate::dlss::evaluate(
+    // Through `sharpen`, which is `dlss::evaluate` unless the settings ask
+    // for the result to be sharpened on its way into the target. The target
+    // is in unordered access here: the plan above put it there.
+    let evaluated = crate::sharpen::evaluate(
         this,
         &crate::dlss::Frame {
             colour: colour as *mut c_void,
@@ -1390,6 +1393,7 @@ pub(crate) unsafe fn resolve_at_slot(
             motion_scale,
             reset: false,
         },
+        true,
     );
     perf.stop();
     let back: Vec<D3D12_RESOURCE_BARRIER> = moves
@@ -2267,7 +2271,10 @@ unsafe fn run_dlss(this: *mut c_void, groups_x: u32, groups_y: u32) -> bool {
     });
 
     let perf = crate::perf::start(crate::perf::Family::Evaluate);
-    let evaluated = crate::dlss::evaluate(this, &frame);
+    // Through `sharpen`, as at the upscale stage. Not sharpened when the
+    // target's state was never observed: NGX is handed it as it is, and this
+    // library's own pass would be writing a texture it cannot vouch for.
+    let evaluated = crate::sharpen::evaluate(this, &frame, output_tracked);
     perf.stop();
     // Counted as a resolve once it is one. It was counted before the
     // evaluation, so an evaluation that failed every time still read, to the

@@ -155,6 +155,7 @@ while the game runs. These are the ones that matter:
 | --- | --- | --- |
 | `render_scale` | `0.667` | Fraction of the display resolution the scene is rendered at, any value from `0.50` to `1.00`. `1.00` is DLAA, `0.667` is DLSS Quality, `0.58` Balanced, `0.50` Performance. Applies while playing. |
 | `mip_bias` | `0` | `1` sharpens texture sampling to suit the render scale; `0` leaves it as the game has it. Fixed when the game starts, for the render scale set then: restart after changing either. |
+| `sharpen` | `0.0` | How strongly the picture is sharpened after DLSS, `0.0` to `1.0`; `0` is off. Done before the interface is drawn, so the interface stays as it is. Applies while playing. |
 | `fg` | `0` | `1` turns frame generation on. Decided when the game starts: restart after changing it. |
 | `fg_multiplier` | `2` | Frames shown per rendered frame: `2`, `3` or `4`. Applies while playing. |
 | `fg_interpolate` | `1` | In a session started with `fg = 1`, `0` switches generated frames off without a restart. |
@@ -274,8 +275,9 @@ folder instead.
 * With frame generation on, labels attached to things in the world, such as
   the nameplate over a companion, can smear slightly when the camera pans.
   The rest of the interface is clean.
-* There is no sharpening. DLSS 4 does not sharpen and the mod has no
-  sharpening pass of its own yet; a ReShade sharpening effect fills the gap.
+* Sharpening is off as shipped. DLSS 4 does not sharpen; `sharpen` turns on
+  a pass of the mod's own after it, which leaves the interface alone where a
+  ReShade sharpening effect does not.
 * Turning frame generation on or off needs a restart of the game.
 * It has been tested on one machine. 1080p and 1440p displays and other
   graphics cards are untested; reports are welcome.
