@@ -1,0 +1,63 @@
+[package]
+name = "mhw_dlss"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+license = "GPL-3.0-only"
+description = "DLSS 4 upscaling and DLSS frame generation for Monster Hunter: World (DirectX 12)"
+repository = "https://github.com/Gargauth/mhworld-dlss"
+readme = "README.md"
+keywords = ["dlss", "monster-hunter-world", "mod", "direct3d12"]
+categories = ["graphics", "game-development"]
+# A game mod, distributed as a release archive. Not a crates.io package.
+publish = false
+
+# The two build products and the names they are released under:
+#
+#   target\release\mhw_dlss.dll  ->  mhw-dlss\mhw-dlss.dll
+#   target\release\launcher.exe  ->  mhw-dlss\mhw-dlss-launcher.exe
+#
+# A library target's name has to be a Rust identifier, so Cargo cannot produce
+# the hyphenated file name itself. Both files are renamed when they are
+# installed (deploy.ps1) or packaged (the release workflow).
+[lib]
+name = "mhw_dlss"
+crate-type = ["cdylib"]
+
+[dependencies]
+parking_lot = "0.12"
+
+[dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_System_Performance",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_UI_Input_KeyboardAndMouse",
+]
+
+[profile.release]
+opt-level = 3
+panic = "abort"
+lto = true
+codegen-units = 1
+# Line tables only, kept on purpose. DWARF costs nothing at run time, and it
+# is what turns the fault address in a Windows event log entry into a
+# function and a line of this crate with `addr2line`: a crash report from a
+# user's machine is otherwise an offset into a DLL.
+debug = 1

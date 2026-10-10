@@ -1,0 +1,17 @@
+# The compiler this project is built and released with: Rust 1.98.1 for the
+# GNU Windows host (x86_64-pc-windows-gnu), which brings its own linker and
+# needs no Visual Studio.
+#
+# rustup installs a plain version named in this file by itself, but only for
+# its default host, which on Windows is MSVC. A name that carries the host,
+# as this one does, is accepted once that toolchain is installed, so install
+# it once:
+#
+#     rustup toolchain install 1.98.1-x86_64-pc-windows-gnu --component rustfmt --component clippy
+#
+# After that `cargo build --release`, `cargo test`, `cargo fmt` and
+# `cargo clippy` in this folder and in tools/standin all use it. Without it
+# rustup stops with "target tuple in channel name", which means the line
+# above has not been run.
+[toolchain]
+channel = "1.98.1-x86_64-pc-windows-gnu"
