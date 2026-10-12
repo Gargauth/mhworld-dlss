@@ -1,0 +1,30 @@
+[package]
+name = "mhw-dev"
+description = "mhw-dlss: dev (see docs/ARCHITECTURE.md)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The crate exists only for dev builds: every dependency's `dev` side is on.
+mhw-core = { workspace = true, features = ["dev"] }
+mhw-win.workspace = true
+mhw-engine = { workspace = true, features = ["dev"] }
+mhw-render = { workspace = true, features = ["dev"] }
+mhw-ngx = { workspace = true, features = ["dev"] }
+mhw-fg = { workspace = true, features = ["dev"] }
+# `kv`: structured fields on log lines.
+log = { workspace = true, features = ["kv"] }
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# BCryptGenRandom for the token; QueryPerformanceCounter for `trace`;
+# GetProcessTimes for module load times.
+windows = { workspace = true, features = ["Win32_Security_Cryptography"] }

@@ -1,0 +1,24 @@
+[package]
+name = "mhw-render"
+description = "mhw-dlss: render (see docs/ARCHITECTURE.md)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Dev-only introspection (registry dumps for the dev server).
+dev = []
+
+[dependencies]
+log.workspace = true
+mhw-core.workspace = true
+parking_lot.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+mhw-win.workspace = true
+windows.workspace = true

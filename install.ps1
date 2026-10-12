@@ -25,7 +25,11 @@
          before anything else happens.
       4. Copies the archive's one folder, mhw-dlss, into the game folder. An
          existing mhw-dlss.ini or mhw-dlss-loader.ini in it is never
-         overwritten.
+         overwritten, with one exception: a settings file of version 0.2
+         (keys such as render_scale and fg, no [Sections]) means nothing to
+         0.3, so it is kept as mhw-dlss.0.2.ini and a new mhw-dlss.ini with
+         the defaults takes its place. The README maps the old keys to the
+         new ones.
       5. Runs the fetch-nvidia.ps1 that came in the archive, which downloads
          NVIDIA's libraries from NVIDIA and checks them itself.
       6. Installs the optional tools that were asked for, each from its own
@@ -80,10 +84,12 @@
     mhw-dlss\mhw-dlss-installed.txt: the mod, NVIDIA's libraries, and any
     optional tool it installed, with the chain-file lines it added. Also the
     files a release archive and fetch-nvidia.ps1 are known to install, for
-    an install made by hand, and the logs. Your two settings files are kept,
-    and so is anything else in the folder that this script did not put
-    there. What is kept is listed. The folder itself is removed only if it
-    ends up empty. -Purge removes the whole folder, whatever is in it.
+    an install made by hand, and the logs. Your settings files are kept
+    (mhw-dlss.ini, mhw-dlss-loader.ini, and mhw-dlss.0.2.ini if an update
+    set one aside), and so is anything else in the folder that this script
+    did not put there. What is kept is listed. The folder itself is removed
+    only if it ends up empty. -Purge removes the whole folder, whatever is
+    in it.
 
 .PARAMETER GameDir
     The Monster Hunter: World folder, when Steam's configuration does not
@@ -110,11 +116,12 @@
     until fetch-nvidia.cmd has been run.
 
 .PARAMETER FrameGeneration
-    Turn frame generation on (fg = 1 in mhw-dlss.ini) without being asked.
-    Needs an RTX 40 or 50 series card.
+    Turn frame generation on ([FrameGeneration] Enabled = true in
+    mhw-dlss.ini) without being asked. Needs an RTX 40 or 50 series card.
 
 .PARAMETER NoFrameGeneration
-    Turn frame generation off (fg = 0) without being asked.
+    Turn frame generation off ([FrameGeneration] Enabled = false) without
+    being asked.
 
 .PARAMETER ReShade
     Install ReShade without being asked.
@@ -232,12 +239,14 @@ $mhwDlssArguments = @{
     # The settings file as the mod itself would write it, shipped in the
     # archive so that this script can start one from it. See Set-FrameGeneration.
     $DefaultSettings = "$ModFolder\mhw-dlss.default.ini"
+    # Where a 0.2 settings file is set aside. See Update-OldSettings.
+    $OldSettings     = "$ModFolder\mhw-dlss.0.2.ini"
     # What this script installed, for -Uninstall.
     $ManifestFile    = "$ModFolder\mhw-dlss-installed.txt"
     $LicenceNote     = "$CompanionFolder\COMPANION-LICENCES.txt"
 
     # The user's own files. Never overwritten, and removed only by -Purge.
-    $Settings     = @($SettingsFile, $ChainFile)
+    $Settings     = @($SettingsFile, $ChainFile, $OldSettings)
     # What a release archive and fetch-nvidia.ps1 are known to install, and
     # what the mod, the launcher and NVIDIA's libraries write while they run.
     # -Uninstall removes these by name as well as what the manifest lists, so
@@ -248,9 +257,11 @@ $mhwDlssArguments = @{
                       'sl.pcl.dll', 'nvngx_dlssg.dll', 'nvngx_dlss.dll',
                       'streamline.license.txt', 'nvngx_dlss.license.txt', 'reflex.license.txt') |
                     ForEach-Object { "$NvidiaFolder\$_" }
+    # dev.token: written by a dev build only (docs/DEVELOPMENT.md).
     $RunFiles     = @("$ModFolder\mhw-dlss.log", "$ModFolder\mhw-dlss.previous.log",
                       "$ModFolder\mhw-dlss-launcher.log", "$ModFolder\mhw-dlss-launcher.previous.log",
-                      "$SettingsFile.writing", "$NvidiaFolder\sl.log", "$NvidiaFolder\nvngx.log")
+                      "$SettingsFile.writing", "$NvidiaFolder\sl.log", "$NvidiaFolder\nvngx.log",
+                      "$ModFolder\dev.token")
 
     # -----------------------------------------------------------------------
     # THE OPTIONAL TOOLS. Versions this mod was verified with, each with the
@@ -633,42 +644,97 @@ $mhwDlssArguments = @{
 
     # --- small edits to text files, leaving every other byte alone ----------
 
-    # $Text with $Key set to $Value on every line that sets it, or appended.
-    # The same rule as the mod's own writer (config::with_key).
-    function Set-KeyInText([string]$Text, [string]$Key, [string]$Value) {
-        $out = New-Object System.Text.StringBuilder
-        $found = $false
-        foreach ($line in [regex]::Split($Text, '(?<=\n)')) {
-            if ($line -eq '') { continue }
-            $body = $line.TrimEnd("`r", "`n")
-            $ending = $line.Substring($body.Length)
-            $trimmed = $body.TrimStart()
+    # Whether $Text is a settings file of 0.2: keys (render_scale, fg, ...)
+    # and no [Section] at all. Every file of 0.3 has sections.
+    function Test-OldSettings([string]$Text) {
+        $assignment = $false
+        foreach ($line in ($Text -split "`r?`n")) {
+            $trimmed = $line.Trim().TrimStart([char]0xFEFF)
+            if ($trimmed -eq '' -or $trimmed.StartsWith('#') -or $trimmed.StartsWith(';')) { continue }
+            if ($trimmed.StartsWith('[')) { return $false }
+            if ($trimmed.Contains('=')) { $assignment = $true }
+        }
+        return $assignment
+    }
+
+    # $Text with $Key in [$Section] set to $Value. Sections and keys match
+    # without regard to case, as the mod reads them. A key that is not there
+    # goes right after its section's header, and a section that is not there
+    # at the end of the file. Every other byte is left alone.
+    function Set-IniValue([string]$Text, [string]$Section, [string]$Key, [string]$Value) {
+        $ending = "`r`n"
+        if ($Text -notmatch "`r`n" -and $Text -match "`n") { $ending = "`n" }
+        $lines = New-Object System.Collections.Generic.List[string]
+        foreach ($piece in [regex]::Split($Text, '(?<=\n)')) { if ($piece -ne '') { $lines.Add($piece) } }
+        # PowerShell names are not case-sensitive: $current is not $Section.
+        $current = ''
+        $header = -1
+        $found = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            $trimmed = $lines[$i].Trim().TrimStart([char]0xFEFF)
+            if ($trimmed -match '^\[\s*([^\]]*?)\s*\]') {
+                $current = $Matches[1]
+                if ($current -ieq $Section -and $header -lt 0) { $header = $i }
+                continue
+            }
+            if ($current -ine $Section -or $found -ge 0 -or $trimmed.StartsWith(';') -or $trimmed.StartsWith('#')) { continue }
             $index = $trimmed.IndexOf('=')
-            if (-not $trimmed.StartsWith('#') -and -not $trimmed.StartsWith(';') -and $index -gt 0 -and $trimmed.Substring(0, $index).Trim() -eq $Key) {
-                $found = $true
-                [void]$out.Append("$Key = $Value$ending")
+            if ($index -gt 0 -and $trimmed.Substring(0, $index).Trim() -ieq $Key) { $found = $i }
+        }
+        $setting = "$Key = $Value"
+        if ($found -ge 0) {
+            $body = $lines[$found].TrimEnd("`r", "`n")
+            $lines[$found] = $setting + $lines[$found].Substring($body.Length)
+        } else {
+            if ($lines.Count -gt 0 -and -not $lines[$lines.Count - 1].EndsWith("`n")) {
+                $lines[$lines.Count - 1] = $lines[$lines.Count - 1] + $ending
+            }
+            if ($header -ge 0) {
+                $lines.Insert($header + 1, "$setting$ending")
             } else {
-                [void]$out.Append($line)
+                if ($lines.Count -gt 0) { $lines.Add($ending) }
+                $lines.Add("[$Section]$ending$setting$ending")
             }
         }
-        if (-not $found) {
-            if ($out.Length -gt 0 -and -not $out.ToString().EndsWith("`n")) { [void]$out.Append("`n") }
-            [void]$out.Append("$Key = $Value`n")
-        }
-        return $out.ToString()
+        return ($lines -join '')
     }
 
     function Write-Text([string]$Path, [string]$Text) {
         [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
     }
 
-    # Set fg in the settings file. The mod writes that file itself, complete
-    # with its explanations, but only when there is none: a file holding just
-    # "fg = 1" would stay that bare. So a file that does not exist yet is
-    # started from the copy of the mod's own text that the archive carries.
+    # A settings file of 0.2 is set aside as $OldSettings and replaced by
+    # the default, which the archive carries: 0.3 would read none of its
+    # keys, name each in its log as unknown, and run on the defaults while
+    # the file said otherwise. The README maps the old keys to the new.
+    function Update-OldSettings([string]$Game) {
+        $path = Join-Path $Game $SettingsFile
+        if (-not (Test-Path -LiteralPath $path)) { return }
+        if (-not (Test-OldSettings ([System.IO.File]::ReadAllText($path)))) { return }
+        $backup = Join-Path $Game $OldSettings
+        if (Test-Path -LiteralPath $backup) {
+            # One set aside already, by an earlier run: that one is kept too.
+            $backup = Join-Path $Game ("$ModFolder\mhw-dlss.0.2-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.ini')
+        }
+        Move-Item -LiteralPath $path -Destination $backup
+        Note ("kept        {0}  (your 0.2 settings; 0.3 uses new keys, see the README)" -f $backup.Substring($Game.Length + 1))
+        $default = Join-Path $Game $DefaultSettings
+        if (Test-Path -LiteralPath $default) {
+            Copy-Item -LiteralPath $default -Destination $path
+            Note ("added       {0}  (the defaults of this version)" -f $SettingsFile)
+        } else {
+            Note ("            the mod writes a new {0} when it next starts" -f $SettingsFile)
+        }
+    }
+
+    # Set [FrameGeneration] Enabled in the settings file. The mod writes that
+    # file itself, complete with its explanations, but only when there is
+    # none: a file holding just this key would stay that bare. So a file that
+    # does not exist yet is started from the copy of the mod's own text that
+    # the archive carries.
     function Set-FrameGeneration([string]$Game, [bool]$On) {
-        $value = '0'
-        if ($On) { $value = '1' }
+        $value = 'false'
+        if ($On) { $value = 'true' }
         $path = Join-Path $Game $SettingsFile
         if (Test-Path -LiteralPath $path) {
             $text = [System.IO.File]::ReadAllText($path)
@@ -681,9 +747,9 @@ $mhwDlssArguments = @{
                 Warn "this release has no $DefaultSettings to start the settings file from, so it will hold only this one key"
             }
         }
-        $updated = Set-KeyInText $text 'fg' $value
+        $updated = Set-IniValue $text 'FrameGeneration' 'Enabled' $value
         if ($updated -ne $text -or -not (Test-Path -LiteralPath $path)) { Write-Text $path $updated }
-        Note ("set         fg = {0} in {1}" -f $value, $SettingsFile)
+        Note ("set         [FrameGeneration] Enabled = {0} in {1}" -f $value, $SettingsFile)
     }
 
     # Add a line to the chain file unless a line already loads that library.
@@ -1042,6 +1108,8 @@ $mhwDlssArguments = @{
                 if (($Settings -notcontains $name) -and ($manifest.Files -notcontains $name)) { $manifest.Files += $name }
             }
             Write-Manifest $game $manifest
+
+            Update-OldSettings $game
 
             if ($null -ne $choices.FrameGeneration) {
                 Set-FrameGeneration $game $choices.FrameGeneration

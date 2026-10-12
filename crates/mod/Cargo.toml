@@ -1,0 +1,46 @@
+[package]
+name = "mhw-dlss"
+description = "DLSS 4 upscaling and DLSS frame generation for Monster Hunter: World (DirectX 12)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "mhw_dlss"
+crate-type = ["cdylib"]
+
+[features]
+# Dev build: TCP control server, probes, capture, [Dev]/[Experimental] settings.
+# Never enabled for releases; CI checks the release DLL contains none of it.
+dev = [
+    "dep:mhw-dev",
+    "dep:serde_json",
+    "mhw-core/dev",
+    "mhw-engine/dev",
+    "mhw-render/dev",
+    "mhw-ngx/dev",
+    "mhw-fg/dev",
+]
+
+[lints]
+workspace = true
+
+[dependencies]
+mhw-core.workspace = true
+mhw-win.workspace = true
+mhw-engine.workspace = true
+mhw-render.workspace = true
+mhw-ngx.workspace = true
+mhw-fg.workspace = true
+mhw-dev = { workspace = true, optional = true }
+# The names shared with the launcher across the process boundary
+# (`handoff`), from its pure library.
+mhw-dlss-launcher = { path = "../launcher" }
+log = { workspace = true, features = ["kv"] }
+parking_lot.workspace = true
+serde_json = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true

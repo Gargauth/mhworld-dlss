@@ -1,7 +1,8 @@
 [package]
 name = "standin"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+rust-version = "1.98"
 license = "GPL-3.0-only"
 description = "Stands in for the game's renderer start-up, to test mhw-dlss with companion tools outside the game"
 repository = "https://github.com/Gargauth/mhworld-dlss"
@@ -9,9 +10,11 @@ publish = false
 
 # Not part of the mod and not a workspace member: built on its own, with
 #   cargo build --release --manifest-path tools/standin/Cargo.toml
+# The log verdict (src/verdict.rs) is plain Rust and tested on any host:
+#   cargo test --manifest-path tools/standin/Cargo.toml
 [workspace]
 
-[dependencies.windows]
+[target.'cfg(windows)'.dependencies.windows]
 version = "0.58"
 features = [
     "Win32_Foundation",

@@ -1,0 +1,26 @@
+[package]
+name = "mhw-ngx"
+description = "mhw-dlss: NGX ABI, session and the DLSS-SR feature lifecycle (see docs/ARCHITECTURE.md)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Dev build: introspection snapshots (session, feature, last evaluation,
+# loaded DLSS libraries) for the dev server.
+dev = ["mhw-core/dev"]
+
+[dependencies]
+mhw-core.workspace = true
+mhw-win.workspace = true
+# `kv`: structured fields on log lines.
+log = { workspace = true, features = ["kv"] }
+parking_lot.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true

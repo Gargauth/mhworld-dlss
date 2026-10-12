@@ -1,7 +1,9 @@
 name: ci
 
-# Builds and tests every push and pull request, and assembles the release
-# archive to check that it still packages. Nothing is published from here.
+# Every push and pull request: format, lint (release and dev, for the
+# Windows target), host tests, the scripts, and both builds packaged
+# (build.yml). Nothing is published from here; the dev archive is kept with
+# the run, labelled -dev-build.
 on:
   push:
     branches: ['**']
@@ -14,61 +16,93 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  build:
-    runs-on: windows-latest
-    defaults:
-      run:
-        shell: pwsh
-    env:
-      CARGO_TERM_COLOR: always
+  lint:
+    name: lint (${{ matrix.flavour }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        flavour: [release, dev]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: lint-${{ matrix.flavour }}
+
+      - name: Formatting
+        if: matrix.flavour == 'release'
+        run: |
+          cargo fmt --all --check
+          cargo fmt --manifest-path tools/standin/Cargo.toml --check
+
+      # Clippy does not link, so the Windows code is checked from Linux
+      # without zig. The release flavour leaves mhw-dev out: selecting it
+      # turns on `dev` in every crate it depends on, and the release-only
+      # (`not(feature = "dev")`) code would go unchecked.
+      - name: Clippy (Windows target)
+        run: cargo clippy --workspace --all-targets --locked --target x86_64-pc-windows-gnu ${{ matrix.flavour == 'dev' && '--features dev' || '--exclude mhw-dev' }} -- -D warnings
+
+      - name: Clippy (host)
+        run: cargo clippy --workspace --all-targets --locked ${{ matrix.flavour == 'dev' && '--features dev' || '--exclude mhw-dev' }} -- -D warnings
+
+      - name: Clippy (tools/standin, Windows target)
+        if: matrix.flavour == 'release'
+        run: cargo clippy --manifest-path tools/standin/Cargo.toml --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: test
+
+      # Without mhw-dev, which would unify `dev` into the release crates.
+      - name: Host tests
+        run: cargo test --workspace --locked --exclude mhw-dev
+
+      - name: Host tests (dev)
+        run: cargo test --workspace --locked --features dev
+
+      - name: tools/standin tests
+        run: cargo test --manifest-path tools/standin/Cargo.toml
+
+      - name: devctl tests
+        run: python -m unittest discover -s tools/devctl -v
+
+  scripts:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
-      # rust-toolchain.toml names the toolchain with its host
-      # (x86_64-pc-windows-gnu), and rustup accepts such a name only once
-      # that toolchain is installed, so it is installed by name first. The
-      # GNU toolchain brings its own linker; nothing else is needed.
-      - name: Install the pinned Rust toolchain
-        run: |
-          $channel = (Select-String -Path rust-toolchain.toml -Pattern '^channel\s*=\s*"(.+)"').Matches[0].Groups[1].Value
-          if ($channel -notmatch '-x86_64-pc-windows-gnu$') { throw "rust-toolchain.toml names '$channel', which is not a GNU Windows toolchain" }
-          rustup toolchain install $channel --profile minimal --component rustfmt --component clippy --no-self-update
-          if ($LASTEXITCODE -ne 0) { throw 'the toolchain could not be installed' }
-          rustc -vV
-          $rustcHost = (rustc -vV | Select-String '^host: (.+)$').Matches[0].Groups[1].Value
-          if ($rustcHost -ne 'x86_64-pc-windows-gnu') { throw "building with $rustcHost, not x86_64-pc-windows-gnu" }
-
-      - name: Formatting
-        run: cargo fmt --check
-
-      - name: Clippy
-        run: cargo clippy --locked -- -D warnings
-
-      - name: Test
-        run: cargo test --locked
-
-      - name: Build
-        run: cargo build --release --locked
-
-      # Not part of the mod and not shipped: the test program that stands in
-      # for the game's renderer start-up. Built so that it does not rot. It
-      # has no lock file of its own, so this build is not --locked.
-      - name: Build tools/standin
-        run: cargo build --release --manifest-path tools/standin/Cargo.toml
-
+      # Windows PowerShell 5.1 reads a script without a BOM as the ANSI code
+      # page, so anything outside ASCII would be mangled for some users.
       - name: The scripts are plain ASCII and parse
-        shell: powershell
+        shell: pwsh
         run: |
           $bad = 0
-          foreach ($file in 'install.ps1', 'fetch-nvidia.ps1', 'deploy.ps1', '.github\scripts\package.ps1', 'tools\test-fetch-nvidia.ps1') {
+          $files = @(git ls-files '*.ps1' '*.cmd')
+          if ($files.Count -eq 0) { throw 'no scripts found' }
+          foreach ($file in $files) {
             $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $file).Path)
-            if ($bytes | Where-Object { $_ -gt 127 } | Select-Object -First 1) { Write-Host "::error::$file is not pure ASCII"; $bad++ }
-            $errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file).Path, [ref]$null, [ref]$errors) | Out-Null
-            foreach ($problem in $errors) { Write-Host "::error::${file}: $problem"; $bad++ }
+            if ($bytes | Where-Object { $_ -gt 127 } | Select-Object -First 1) { Write-Host "::error file=$file::not pure ASCII"; $bad++ }
+            if ($file -like '*.ps1') {
+              $errors = $null
+              [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file).Path, [ref]$null, [ref]$errors) | Out-Null
+              foreach ($problem in $errors) { Write-Host "::error file=$file,line=$($problem.Extent.StartLineNumber)::$($problem.Message)"; $bad++ }
+            }
+            Write-Host "checked $file"
           }
           if ($bad) { throw "$bad problems in the scripts" }
 
-      - name: Package
-        run: ./.github/scripts/package.ps1 -Tag v0.0.0-ci -OutDir dist
+      - name: Shell scripts
+        run: git ls-files -z '*.sh' | xargs -0 shellcheck
+
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      tag: v0.0.0-ci
