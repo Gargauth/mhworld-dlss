@@ -1,0 +1,48 @@
+name: Set up the toolchain
+description: >-
+  The Rust toolchain named in rust-toolchain.toml with the
+  x86_64-pc-windows-gnu target, Python, and for cross builds zig and
+  cargo-zigbuild. Run after checkout.
+
+inputs:
+  cross:
+    description: Also install zig and cargo-zigbuild (for linking Windows binaries).
+    default: 'false'
+  cache-key:
+    description: Extra key for the cargo cache, one per job kind.
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # devctl's tests need 3.10+; cargo-zigbuild and zig come from PyPI.
+    - uses: actions/setup-python@v7
+      with:
+        python-version: '3.12'
+
+    # rust-toolchain.toml pins the version; rustup installs it by name with
+    # the Windows target, so clippy can check the Windows code from Linux.
+    - name: Rust toolchain
+      shell: bash
+      run: |
+        channel=$(sed -n 's/^channel *= *"\(.*\)"$/\1/p' rust-toolchain.toml)
+        test -n "$channel" || { echo "::error::no channel in rust-toolchain.toml"; exit 1; }
+        rustup toolchain install "$channel" --profile minimal \
+          --component rustfmt --component clippy \
+          --target x86_64-pc-windows-gnu --no-self-update
+        rustc -vV
+        cargo -V
+
+    # Pinned: the versions the cross build was verified with. zig links the
+    # Windows binaries; cargo-zigbuild finds it through `python -m ziglang`.
+    - name: zig and cargo-zigbuild
+      if: inputs.cross == 'true'
+      shell: bash
+      run: |
+        python -m pip install --disable-pip-version-check ziglang==0.17.0 cargo-zigbuild==0.23.4
+        python -m ziglang version
+        cargo zigbuild --help > /dev/null
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ inputs.cache-key }}

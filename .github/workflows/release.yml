@@ -1,14 +1,16 @@
 name: release
 
-# Builds the two programs, packages them as they are extracted into the game
-# folder, and attaches the archive and its SHA-256 sums to the release.
+# Builds both flavours (build.yml) and attaches the RELEASE archive and its
+# SHA-256 sums to the GitHub release. The dev archive is built and kept with
+# the workflow run only: it contains the dev server and is never a release
+# asset.
 #
 # A pushed tag v* creates the release as a draft with the files attached;
 # publishing it is done by hand. Publishing a release also starts this
 # workflow, and that run attaches the files only if they are not there yet,
 # so a release never has its files replaced after somebody may have
-# downloaded them. A manual run builds the same archive and keeps it as a
-# workflow artifact without touching any release.
+# downloaded them. A manual run builds the archives and keeps them as
+# workflow artifacts without touching any release.
 on:
   push:
     tags: ['v*']
@@ -24,123 +26,89 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    runs-on: windows-latest
-    permissions:
-      contents: write
-    defaults:
-      run:
-        shell: pwsh
-    env:
-      CARGO_TERM_COLOR: always
-      GH_TOKEN: ${{ github.token }}
+  tag:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      release: ${{ steps.tag.outputs.release }}
+      ref: ${{ steps.tag.outputs.ref }}
     steps:
       - name: Work out the tag
         id: tag
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          $tag = '${{ github.event.release.tag_name }}'
-          if (-not $tag -and '${{ github.ref_type }}' -eq 'tag') { $tag = '${{ github.ref_name }}' }
-          $release = [bool]$tag
-          if (-not $tag) { $tag = 'v0.0.0-manual' }
-          if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$') {
-            throw "'$tag' is not a tag of the form v1.2.3"
-          }
-          "tag=$tag" >> $env:GITHUB_OUTPUT
-          "release=$($release.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          tag="$RELEASE_TAG"
+          if [ -z "$tag" ] && [ "$REF_TYPE" = tag ]; then tag="$REF_NAME"; fi
+          release=false
+          ref="$GITHUB_SHA"
+          if [ -n "$tag" ]; then release=true; ref="refs/tags/$tag"; else tag=v0.0.0-manual; fi
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$'; then
+            echo "::error::'$tag' is not a tag of the form v1.2.3"; exit 1
+          fi
+          { echo "tag=$tag"; echo "release=$release"; echo "ref=$ref"; } >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v7
         with:
-          ref: ${{ steps.tag.outputs.release == 'true' && format('refs/tags/{0}', steps.tag.outputs.tag) || github.sha }}
+          ref: ${{ steps.tag.outputs.ref }}
 
       - name: The tag is the version in Cargo.toml
         if: steps.tag.outputs.release == 'true'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
-          if ('${{ steps.tag.outputs.tag }}' -ne "v$version") {
-            throw "the tag is ${{ steps.tag.outputs.tag }} and Cargo.toml says $version"
-          }
+          version=$(sed -n 's/^version *= *"\(.*\)"$/\1/p' Cargo.toml | head -n1)
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::the tag is $TAG and Cargo.toml says $version"; exit 1
+          fi
 
-      # rust-toolchain.toml names the toolchain with its host
-      # (x86_64-pc-windows-gnu), and rustup accepts such a name only once
-      # that toolchain is installed, so it is installed by name first. The
-      # GNU toolchain brings its own linker; nothing else is needed.
-      - name: Install the pinned Rust toolchain
-        run: |
-          $channel = (Select-String -Path rust-toolchain.toml -Pattern '^channel\s*=\s*"(.+)"').Matches[0].Groups[1].Value
-          if ($channel -notmatch '-x86_64-pc-windows-gnu$') { throw "rust-toolchain.toml names '$channel', which is not a GNU Windows toolchain" }
-          rustup toolchain install $channel --profile minimal --component rustfmt --component clippy --no-self-update
-          if ($LASTEXITCODE -ne 0) { throw 'the toolchain could not be installed' }
-          rustc -vV
-          $rustcHost = (rustc -vV | Select-String '^host: (.+)$').Matches[0].Groups[1].Value
-          if ($rustcHost -ne 'x86_64-pc-windows-gnu') { throw "building with $rustcHost, not x86_64-pc-windows-gnu" }
+  build:
+    needs: tag
+    uses: ./.github/workflows/build.yml
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
+      ref: ${{ needs.tag.outputs.ref }}
 
-      # Set once for the test and the build. --remap-path-prefix keeps the
-      # runner's paths out of the debug information and the panic messages;
-      # when several prefixes match, the last one given wins, so the most
-      # general comes first. MHW_DLSS_COMMIT is read by src/version.rs at
-      # compile time and shown in the first line of both logs.
-      - name: Build settings
-        run: |
-          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
-          $flags = "--remap-path-prefix=$env:USERPROFILE=home --remap-path-prefix=$cargoHome=cargo --remap-path-prefix=$env:GITHUB_WORKSPACE=."
-          if (($env:USERPROFILE + $cargoHome + $env:GITHUB_WORKSPACE) -match '\s') {
-            throw 'a path with a space in it cannot be passed through RUSTFLAGS'
-          }
-          "RUSTFLAGS=$flags" >> $env:GITHUB_ENV
-          "MHW_DLSS_COMMIT=$((git rev-parse HEAD).Substring(0, 10))" >> $env:GITHUB_ENV
-
-      - name: Test
-        run: cargo test --locked
-
-      - name: Build
-        run: cargo build --release --locked
-
-      - name: No build path in the binaries
-        run: |
-          $needles = @($env:GITHUB_WORKSPACE, $env:USERPROFILE, (Split-Path -Leaf $env:USERPROFILE)) | Where-Object { $_ }
-          foreach ($file in 'target\release\mhw_dlss.dll', 'target\release\launcher.exe') {
-            $text = [System.Text.Encoding]::GetEncoding(28591).GetString([System.IO.File]::ReadAllBytes((Resolve-Path $file).Path))
-            foreach ($needle in $needles) {
-              foreach ($form in $needle, $needle.Replace('\', '/')) {
-                if ($text.IndexOf($form, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                  throw "$file contains the build path '$form'"
-                }
-              }
-            }
-            if ($text.IndexOf($env:MHW_DLSS_COMMIT) -lt 0) { throw "$file does not carry the commit $env:MHW_DLSS_COMMIT" }
-          }
-
-      - name: Package
-        run: ./.github/scripts/package.ps1 -Tag '${{ steps.tag.outputs.tag }}' -OutDir dist
-
-      - name: Keep the archive with the run
-        uses: actions/upload-artifact@v7
+  attach:
+    needs: [tag, build]
+    if: needs.tag.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.tag.outputs.tag }}
+    steps:
+      # Only the release artifact is downloaded: the dev archive cannot be
+      # attached by mistake because it is never on this runner.
+      - uses: actions/download-artifact@v8
         with:
-          name: mhworld-dlss-${{ steps.tag.outputs.tag }}
-          path: dist/
-          if-no-files-found: error
+          name: mhworld-dlss-${{ needs.tag.outputs.tag }}
+          path: dist
 
       - name: Attach to the release
-        if: steps.tag.outputs.release == 'true'
         run: |
-          $tag = '${{ steps.tag.outputs.tag }}'
-          $zip = "dist/mhworld-dlss-$tag.zip"
-          $sums = 'dist/SHA256SUMS.txt'
-          $existing = gh release view $tag --repo $env:GITHUB_REPOSITORY --json assets --jq '.assets[].name' 2>$null
-          if ($LASTEXITCODE -ne 0) {
-            $notes = @(
-              'Install with the one-line installer or by hand: see the README.'
-              ''
-              "SHA-256 of the files is in SHA256SUMS.txt. Built from commit $env:MHW_DLSS_COMMIT."
-              'NVIDIA''s libraries are not in the archive; the installer or fetch-nvidia.cmd downloads them from NVIDIA.'
-            ) -join "`n"
-            gh release create $tag $zip $sums --repo $env:GITHUB_REPOSITORY --draft --verify-tag --title "mhworld-dlss $tag" --notes $notes
-            if ($LASTEXITCODE -ne 0) { throw 'the release could not be created' }
-            Write-Host "created a draft release for $tag with both files; publish it by hand"
-          } elseif (@($existing) -contains "mhworld-dlss-$tag.zip") {
-            Write-Host "release $tag already has its archive; nothing is replaced"
-          } else {
-            gh release upload $tag $zip $sums --repo $env:GITHUB_REPOSITORY
-            if ($LASTEXITCODE -ne 0) { throw 'the files could not be attached' }
-            Write-Host "attached both files to the existing release $tag"
-          }
+          zip="dist/mhworld-dlss-$TAG.zip"
+          sums=dist/SHA256SUMS.txt
+          test -f "$zip" && test -f "$sums"
+          for file in dist/*; do
+            case "$file" in *-dev*) echo "::error::$file is a dev file among the release files"; exit 1 ;; esac
+          done
+          if ! existing=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null); then
+            commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha | cut -c1-10)
+            notes=$(printf '%s\n' \
+              'Install with the one-line installer or by hand: see the README.' \
+              '' \
+              "SHA-256 of the files is in SHA256SUMS.txt. Built from commit $commit." \
+              "NVIDIA's libraries are not in the archive; the installer or fetch-nvidia.cmd downloads them from NVIDIA.")
+            gh release create "$TAG" "$zip" "$sums" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+              --title "mhworld-dlss $TAG" --notes "$notes"
+            echo "created a draft release for $TAG with both files; publish it by hand"
+          elif printf '%s\n' "$existing" | grep -qxF "mhworld-dlss-$TAG.zip"; then
+            echo "release $TAG already has its archive; nothing is replaced"
+          else
+            gh release upload "$TAG" "$zip" "$sums" --repo "$GITHUB_REPOSITORY"
+            echo "attached both files to the existing release $TAG"
+          fi

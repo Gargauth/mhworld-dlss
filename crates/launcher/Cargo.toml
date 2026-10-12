@@ -1,0 +1,41 @@
+[package]
+name = "mhw-dlss-launcher"
+description = "Starts Monster Hunter: World suspended and injects mhw-dlss"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The pure parts (chain file, command line, folder layout, hand-over names,
+# logging) are a library so that they are tested on any host; the Windows
+# glue lives in the binary.
+[lib]
+name = "mhw_dlss_launcher"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mhw-dlss-launcher"
+path = "src/main.rs"
+
+[[example]]
+# Prints the settings file the mod writes on first start (`mhw-dlss.ini`),
+# for the release archive's `mhw-dlss.default.ini`. With `--features dev`
+# it includes the dev sections.
+name = "default-settings"
+
+[features]
+# Only changes what the `default-settings` example prints; the launcher
+# itself is the same program in both builds.
+dev = ["mhw-core/dev"]
+
+[lints]
+workspace = true
+
+[dependencies]
+mhw-core.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true

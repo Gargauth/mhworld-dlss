@@ -1,0 +1,32 @@
+[package]
+name = "mhw-fg"
+description = "mhw-dlss: fg (see docs/ARCHITECTURE.md)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mhw-core.workspace = true
+# `kv`: structured fields on log lines.
+log = { workspace = true, features = ["kv"] }
+parking_lot.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+mhw-win.workspace = true
+# The workspace set plus what the Authenticode check of sl.interposer.dll
+# needs (WinVerifyTrust and the signer certificate's name).
+windows = { workspace = true, features = [
+    "Win32_Security_WinTrust",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
+] }
+
+[features]
+# Dev-only introspection: the full last constants and a marker event ring.
+dev = ["mhw-core/dev"]

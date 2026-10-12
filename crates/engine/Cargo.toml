@@ -1,0 +1,21 @@
+[package]
+name = "mhw-engine"
+description = "mhw-dlss: engine (see docs/ARCHITECTURE.md)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mhw-core.workspace = true
+mhw-win.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+
+[features]
+# Dev-only introspection (viewport and field dumps) for the dev server.
+dev = []

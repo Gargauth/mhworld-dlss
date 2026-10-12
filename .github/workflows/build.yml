@@ -1,0 +1,132 @@
+name: build
+
+# Cross-builds the release and the dev flavour on Linux, checks the
+# binaries, and packages two archives. Called by ci.yml and release.yml;
+# publishes nothing itself.
+#
+# Artifacts:
+#   mhworld-dlss-<tag>              the release archive and SHA256SUMS.txt
+#   mhworld-dlss-<tag>-dev-build    the dev archive and SHA256SUMS-dev.txt;
+#                                   never a release asset (it contains the
+#                                   dev server: memory read/write over TCP)
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Version tag used in the archive names (v1.2.3).
+        required: true
+        type: string
+      ref:
+        description: Commit or tag to build; the triggering commit when empty.
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  binaries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - uses: ./.github/actions/setup
+        with:
+          cross: 'true'
+          cache-key: cross
+
+      # --remap-path-prefix keeps the runner's paths out of the debug
+      # information and panic messages; the last matching prefix wins, so
+      # the most general comes first. MHW_DLSS_COMMIT is compiled into both
+      # binaries (the first line of each log, the dev `hello`).
+      - name: Build settings
+        run: |
+          cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+          echo "RUSTFLAGS=--remap-path-prefix=$HOME=home --remap-path-prefix=$cargo_home=cargo --remap-path-prefix=$GITHUB_WORKSPACE=." >> "$GITHUB_ENV"
+          echo "MHW_DLSS_COMMIT=$(git rev-parse HEAD | cut -c1-10)" >> "$GITHUB_ENV"
+
+      - name: Release build
+        run: tools/xbuild.sh release --locked
+
+      - name: Dev build
+        run: tools/xbuild.sh dev --locked
+
+      - name: The release binaries contain nothing of the dev build
+        run: .github/scripts/check-dev-strings.sh target/x86_64-pc-windows-gnu/release target/dev/x86_64-pc-windows-gnu/dev-release
+
+      - name: No build path in the binaries, and the commit in each
+        run: |
+          status=0
+          for dir in target/x86_64-pc-windows-gnu/release target/dev/x86_64-pc-windows-gnu/dev-release; do
+            for file in "$dir/mhw_dlss.dll" "$dir/mhw-dlss-launcher.exe"; do
+              # Full paths only: the bare user name ("runner") is a word.
+              for needle in "$GITHUB_WORKSPACE" "$HOME"; do
+                if grep -qaF -- "$needle" "$file"; then
+                  echo "::error file=$file::contains the build path '$needle'"; status=1
+                fi
+              done
+              if ! grep -qaF -- "$MHW_DLSS_COMMIT" "$file"; then
+                echo "::error file=$file::does not carry the commit $MHW_DLSS_COMMIT"; status=1
+              fi
+            done
+          done
+          exit "$status"
+
+      # Not shipped: the stand-in for the game's renderer. Built so that it
+      # does not rot; it has no lock file of its own, so not --locked.
+      - name: Build tools/standin
+        run: cargo zigbuild --release --target x86_64-pc-windows-gnu --manifest-path tools/standin/Cargo.toml
+
+      - name: Default settings files
+        run: |
+          mkdir -p out/release out/dev
+          cargo run --quiet --locked -p mhw-dlss-launcher --example default-settings > out/release/mhw-dlss.default.ini
+          cargo run --quiet --locked -p mhw-dlss-launcher --example default-settings --features dev > out/dev/mhw-dlss.default.ini
+          cp target/x86_64-pc-windows-gnu/release/{mhw_dlss.dll,mhw-dlss-launcher.exe} out/release/
+          cp target/dev/x86_64-pc-windows-gnu/dev-release/{mhw_dlss.dll,mhw-dlss-launcher.exe} out/dev/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: binaries
+          path: out/
+          if-no-files-found: error
+          retention-days: 1
+
+  package:
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: binaries
+          path: out
+
+      - name: Release archive
+        shell: pwsh
+        run: ./.github/scripts/package.ps1 -Tag '${{ inputs.tag }}' -Flavour release -BinDir out/release -DefaultIni out/release/mhw-dlss.default.ini -OutDir dist/release
+
+      - name: Dev archive
+        shell: pwsh
+        run: ./.github/scripts/package.ps1 -Tag '${{ inputs.tag }}' -Flavour dev -BinDir out/dev -DefaultIni out/dev/mhw-dlss.default.ini -OutDir dist/dev
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mhworld-dlss-${{ inputs.tag }}
+          path: dist/release/
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mhworld-dlss-${{ inputs.tag }}-dev-build
+          path: dist/dev/
+          if-no-files-found: error

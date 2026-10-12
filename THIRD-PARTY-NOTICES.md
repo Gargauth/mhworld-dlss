@@ -16,8 +16,9 @@ Linked into the binaries:
 | crate | version | copyright |
 | --- | --- | --- |
 | `windows`, `windows-core`, `windows-result`, `windows-strings`, `windows-targets`, `windows_x86_64_gnu`, `windows-link` | 0.58.0, 0.58.0, 0.2.0, 0.1.0, 0.52.6, 0.52.6, 0.2.1 | Copyright (c) Microsoft Corporation |
+| `log` | 0.4.34 | Copyright (c) 2014 The Rust Project Developers |
 | `parking_lot`, `parking_lot_core`, `lock_api` | 0.12.5, 0.9.12, 0.4.14 | Copyright (c) 2016 The Rust Project Developers |
-| `smallvec` | 1.16.2 | Copyright (c) 2018 The Servo Project Developers |
+| `smallvec` | 1.16.3 | Copyright (c) 2018 The Servo Project Developers |
 | `scopeguard` | 1.2.0 | Copyright (c) 2016-2019 Ulrik Sverdrup "bluss" and scopeguard developers |
 | `cfg-if` | 1.0.5 | Copyright (c) 2014 Alex Crichton |
 
@@ -36,10 +37,10 @@ Copyright (c) The Rust Project Contributors) and start-up code from the
 MinGW-w64 runtime that the GNU Windows toolchain links in (public domain and
 the Zope Public License 2.1; see mingw-w64's `COPYING.MinGW-w64-runtime.txt`).
 
-`src/fasthash.rs` uses the finalising step of MurmurHash3, which its author,
-Austin Appleby, placed in the public domain.
+`crates/render/src/addrmap.rs` uses the finalising step of MurmurHash3, which
+its author, Austin Appleby, placed in the public domain.
 
-The sharpening shader in `src/sharpen.rs` is this project's own writing of
+The sharpening shader in `crates/render` is this project's own writing of
 the RCAS filter from AMD's FidelityFX Super Resolution 1.0 (`ffx_fsr1.h`,
 Copyright (c) Advanced Micro Devices, Inc., MIT licence, text below). No
 file of AMD's is included.
@@ -73,15 +74,17 @@ repository. To call their binaries the source declares, by hand, the layouts
 and names those binaries expect:
 
 * **NVIDIA Streamline.** Structure layouts, GUIDs and version numbers in
-  `src/streamline.rs` follow the public headers of the Streamline SDK 2.14.1,
-  which NVIDIA publishes under the MIT licence: Copyright (c) 2023 NVIDIA
+  `crates/fg` follow the public headers of the Streamline SDK 2.14.1, which
+  NVIDIA publishes under the MIT licence: Copyright (c) 2023 NVIDIA
   CORPORATION. All rights reserved. The licence text is the one above.
-* **NVIDIA NGX (DLSS).** Parameter names and function signatures follow the
-  public headers of NVIDIA's DLSS SDK. No NVIDIA source or binary is included.
-* **ReShade.** The add-on export names and the overlay function table used by
-  `src/reshade.rs` and `src/overlay.rs` follow ReShade's public add-on
-  headers at version 6.8.0. ReShade is Copyright 2014 Patrick Mours and is
-  published under the BSD 3-Clause licence.
+* **NVIDIA NGX (DLSS).** Parameter names and function signatures in
+  `crates/ngx` follow the public headers of NVIDIA's DLSS SDK. No NVIDIA
+  source or binary is included.
+* **ReShade.** The `ReShadeVersion` export and the interface ID with which
+  ReShade's proxy objects hand out the object they wrap, used by
+  `crates/render/src/sys/reshade.rs`, follow ReShade's public source at
+  version 6.x. ReShade is Copyright 2014 Patrick Mours and is published under
+  the BSD 3-Clause licence.
 
 ## 3. NVIDIA's libraries, which you download yourself
 
