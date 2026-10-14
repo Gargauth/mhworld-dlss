@@ -40,6 +40,37 @@ none of those names is loaded from the game folder early enough. That is why
 the chain file exists. Do not run ReShade's installer against the game, and
 do not run OptiScaler's `setup_windows.bat`.
 
+### Tools that come as `version.dll` and the like
+
+Some tools are not meant to be renamed: they ship as `version.dll`,
+`winmm.dll`, `dinput8.dll` or similar, with a settings file that has to be
+beside them, and only need to be in the process before the game starts. Left
+to itself the game never loads such a file from its folder in time, so it
+gets a line in the chain file like anything else.
+
+Install the tool the way its own instructions say, beside the game's
+executable, and name it in the chain file by its path from the `mhw-dlss`
+folder:
+
+```text
+mhw-dlss.dll
+..\version.dll
+```
+
+A line with no word after the name is loaded before the game's first
+instruction. Such lines are loaded in the order they are written, so putting
+the tool's line above `mhw-dlss.dll` loads it before the mod. An absolute
+path works as well, and a path with spaces can be written in double quotes.
+
+`mhw-dlss-launcher.log` has an `injected` line for each library that went
+in, and says so when one was not found or would not load.
+
+Removing the `mhw-dlss` folder does not remove a tool installed this way:
+its files are beside the game, and are removed by hand.
+
+The chain file only gets the library loaded. Whether a given tool then works
+with this mod is a separate question, and none has been verified this way.
+
 ## ReShade
 
 Verified with ReShade 6.8.0, the build "with full add-on support", with and
